@@ -17,22 +17,12 @@ OPCM/
 │   ├── model.py            # SingleTaskViT / MultiTaskViT definitions
 │   ├── task_vector.py      # TaskVector class
 │   └── utils.py            # SVD, evaluation, task vector loading utilities
-├── scripts/
-│   ├── train_single_task_model.py  # Single-task fine-tuning
-│   └── evaluate_model.py           # Per-task accuracy evaluation
 └── dataset/                # Dataset directory (raw data excluded)
 ```
 
 ## Usage
 
 ```bash
-# 1. Train single-task models
-python scripts/train_single_task_model.py
-
-# 2. Evaluate single-task models
-python scripts/evaluate_model.py
-
-# 3. Run OPCM merging experiment
 python opcm.py --alpha 0.5
 ```
 
