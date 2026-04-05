@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# VSCode
+.vscode/
+
+# Dataset
+dataset/raw/
+
+# Models
+models/
+
+# MLflow
+mlflow.db
+
+# Results
+result.txt
+
+# Scripts
+scripts/
