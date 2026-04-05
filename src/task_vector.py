@@ -11,7 +11,7 @@ class TaskVector():
         self.linear_weight_list = []
 
         for parameter_name in pretrained:
-            self.backbone[parameter_name] = finetuned[parameter_name] - pretrained[parameter_name]
+            self.backbone[parameter_name] = finetuned[parameter_name] - pretrained[parameter_name].to(finetuned[parameter_name].device)
 
             if 'weight' in parameter_name and any(k in parameter_name for k in ['attn', 'mlp']):
                 self.linear_weight_list.append(parameter_name)
