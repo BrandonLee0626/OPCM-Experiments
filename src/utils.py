@@ -27,12 +27,16 @@ def load_task_vector(task, device):
 def load_task_vectors(device):
     return [load_task_vector(task, device) for task in num_classes_per_task]
 
+_test_dataloader_cache: dict = {}
+
 def evaluate_model(model, tasks):
     results = {}
     for task_idx, task in enumerate(tasks):
         model.eval()
         correct = total = 0
-        test_loader = get_test_dataloader(task, batch_size=64)
+        if task not in _test_dataloader_cache:
+            _test_dataloader_cache[task] = get_test_dataloader(task, batch_size=64)
+        test_loader = _test_dataloader_cache[task]
 
         with torch.no_grad():
             for inputs, labels in test_loader:

@@ -12,6 +12,7 @@ class OPCM:
         self.merged_task_number = 1
         self.avg_task_vector_norm = task_vector.linear_weight_norm()
         self.scaling_factor = 1
+        self.previous_lambda_t = 1.0
         self.projected_task_vector_sum = task_vector
         self.first_tv = task_vector
 
@@ -69,16 +70,20 @@ class OPCM:
     
     def merge_task_vector(self, tv: TaskVector):
         projected_task_vector = self.project_task_vector(tv)
-        self.projected_task_vector_sum += projected_task_vector
 
-        merged_task_number = self.get_merged_task_number()
+        numerator_tv = self.previous_lambda_t * self.merged_task_vector + projected_task_vector
 
         tv_norm = tv.linear_weight_norm()
-        self.avg_task_vector_norm = (merged_task_number * self.avg_task_vector_norm + tv_norm) / (merged_task_number + 1)
+        merged_task_number = self.get_merged_task_number()
+        self.avg_task_vector_norm = (
+            (merged_task_number * self.avg_task_vector_norm + tv_norm) / (merged_task_number + 1)
+        )
 
-        self.scaling_factor = self.projected_task_vector_sum.linear_weight_norm() / self.avg_task_vector_norm
-        
-        self.merged_task_vector = (1 / self.scaling_factor) * self.projected_task_vector_sum
+        new_norm = numerator_tv.linear_weight_norm()
+        self.lambda_t = new_norm / self.avg_task_vector_norm
+
+        self.merged_task_vector = (1 / self.lambda_t) * numerator_tv
+        self.previous_lambda_t = self.lambda_t
         self.merged_task_number += 1
 
     def get_merged_task_vector(self):
