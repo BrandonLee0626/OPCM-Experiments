@@ -16,6 +16,8 @@ mlflow.db
 
 # Results
 result.txt
+result_vit.txt
+result_clip.txt
 results/
 
 # Scripts

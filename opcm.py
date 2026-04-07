@@ -3,7 +3,7 @@ import copy, math, argparse, threading
 from datetime import datetime
 from queue import Queue
 
-from src.model import MultiTaskViT
+from src.model import MultiTaskViT, MultiTaskCLIP
 from src.task_vector import TaskVector
 from src.utils import load_task_vectors, evaluate_model, evaluate_task, frobenius_inner_product
 
@@ -34,7 +34,7 @@ def _sync_replicas(source_model, replicas):
         for name, state in heads_cpu.items():
             replica.heads[name].load_state_dict({k: v.to(dev) for k, v in state.items()})
 
-def evaluate_parallel(replicas, tasks):
+def evaluate_parallel(replicas, tasks, model_type='vit'):
     """
     Evaluate tasks in parallel across GPUs using a GPU pool queue.
     Each GPU processes one task at a time; tasks are dynamically assigned.
@@ -50,7 +50,7 @@ def evaluate_parallel(replicas, tasks):
     def _worker(task_idx, task):
         replica, dev = gpu_queue.get()
         try:
-            acc = evaluate_task(replica, task, dev)
+            acc = evaluate_task(replica, task, dev, model_type=model_type)
             with results_lock:
                 results[f'task_{task_idx}_{task}'] = acc
         finally:
@@ -176,6 +176,9 @@ class OPCM:
 def main(args):
     alpha = args.alpha
     monitor = args.monitor
+    model_type = args.model
+    clip_arch = args.clip_arch
+    vit_arch = args.vit_arch
 
     use_mlflow = monitor in ('mlflow', 'both')
     use_csv = monitor in ('csv', 'both')
@@ -196,10 +199,16 @@ def main(args):
         for i, name in enumerate(gpu_names):
             print(f'  cuda:{i}  {name}')
 
-    model = MultiTaskViT()
+    arch_str = clip_arch if model_type == 'clip' else vit_arch
+    print(f'Model: {model_type} ({arch_str})')
+
+    if model_type == 'clip':
+        model = MultiTaskCLIP(clip_arch=clip_arch)
+    else:
+        model = MultiTaskViT(vit_arch=vit_arch)
     model.to(device)
 
-    task_vectors = load_task_vectors(device)
+    task_vectors = load_task_vectors(device, model_type=model_type, clip_arch=clip_arch, vit_arch=vit_arch)
     tasks = [tv.trained_task_names[0] for tv in task_vectors]
 
     # --- Multi-GPU replicas ---
@@ -210,16 +219,17 @@ def main(args):
 
     def _evaluate(tasks_to_eval):
         if gpu_replicas is not None:
-            return evaluate_parallel(gpu_replicas, tasks_to_eval)
-        return evaluate_model(model, tasks_to_eval)
+            return evaluate_parallel(gpu_replicas, tasks_to_eval, model_type=model_type)
+        return evaluate_model(model, tasks_to_eval, model_type=model_type)
 
     # --- CSV logger setup ---
+    result_txt = f'result_{model_type}_{arch_str}.txt'
     csv_logger = None
     if use_csv:
         from src.csv_logger import CSVLogger, load_single_task_accs
-        single_task_accs = load_single_task_accs('result.txt')
+        single_task_accs = load_single_task_accs(result_txt)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        save_dir = f'results/{timestamp}_alpha{alpha}'
+        save_dir = f'results/{timestamp}_{model_type}_{arch_str}_alpha{alpha}'
         csv_logger = CSVLogger(save_dir, tasks, single_task_accs, alpha)
         print(f'CSV results will be saved to: {save_dir}')
 
@@ -304,6 +314,24 @@ if __name__ == '__main__':
         default='csv',
         help='Logging backend (default: csv)',
     )
+    parser.add_argument(
+        '--model',
+        choices=['vit', 'clip'],
+        default='clip',
+        help='Backbone model type (default: clip)',
+    )
+    parser.add_argument(
+        '--clip_arch',
+        choices=['ViT-B-32', 'ViT-B-16', 'ViT-L-14'],
+        default='ViT-B-32',
+        help='CLIP architecture (only used when --model clip)',
+    )
+    parser.add_argument(
+        '--vit_arch',
+        choices=['vit_base_patch32_224', 'vit_base_patch16_224', 'vit_large_patch16_224'],
+        default='vit_base_patch16_224',
+        help='ViT architecture (only used when --model vit)',
+    )
 
     args = parser.parse_args()
 
@@ -312,6 +340,9 @@ if __name__ == '__main__':
         mlflow.set_experiment('OPCM_experiments')
         with mlflow.start_run():
             mlflow.log_param('alpha', args.alpha)
+            mlflow.log_param('model', args.model)
+            if args.model == 'clip':
+                mlflow.log_param('clip_arch', args.clip_arch)
             main(args)
     else:
         main(args)

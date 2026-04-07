@@ -38,13 +38,33 @@ minimal_train_transform = transforms.Compose([
     _normalize,
 ])
 
-# Test transform (shared)
+# Test transform (shared ViT)
 vit_transform = transforms.Compose([
     _to_rgb,
     transforms.Resize(256),
     transforms.CenterCrop(224),
     transforms.ToTensor(),
     _normalize,
+])
+
+# CLIP transforms
+_clip_normalize = transforms.Normalize(
+    mean=[0.48145466, 0.4578275, 0.40821073],
+    std=[0.26862954, 0.26130258, 0.27577711],
+)
+clip_train_transform = transforms.Compose([
+    _to_rgb,
+    transforms.RandomResizedCrop(224, scale=(0.7, 1.0), interpolation=transforms.InterpolationMode.BICUBIC),
+    transforms.RandomHorizontalFlip(),
+    transforms.ToTensor(),
+    _clip_normalize,
+])
+clip_test_transform = transforms.Compose([
+    _to_rgb,
+    transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    _clip_normalize,
 ])
 
 # Per-dataset train transform overrides
@@ -75,7 +95,8 @@ class HuggingFaceWrapper(Dataset):
 
         return img, label
 
-def _create_dataloader(dataset_name: str, is_train: bool, batch_size: int, num_workers: int) -> DataLoader:
+def _create_dataloader(dataset_name: str, is_train: bool, batch_size: int, num_workers: int,
+                       model_type: str = 'vit') -> DataLoader:
     dataset_dir = './dataset/raw'
     os.makedirs(dataset_dir, exist_ok=True)
 
@@ -83,7 +104,9 @@ def _create_dataloader(dataset_name: str, is_train: bool, batch_size: int, num_w
     s_flag = 'train' if is_train else 'test'
     pet_s_flag = 'trainval' if is_train else 'test'
     shuffle = is_train
-    if is_train:
+    if model_type == 'clip':
+        tf = clip_train_transform if is_train else clip_test_transform
+    elif is_train:
         tf = _DATASET_TRAIN_TRANSFORMS.get(dataset_name, train_transform)
     else:
         tf = vit_transform
@@ -136,8 +159,12 @@ def _create_dataloader(dataset_name: str, is_train: bool, batch_size: int, num_w
 
     raise ValueError(f"알 수 없는 데이터셋 이름: '{dataset_name}'")
 
-def get_train_dataloader(dataset_name: str, batch_size: int = 32, num_workers: int = 2) -> DataLoader:
-    return _create_dataloader(dataset_name, is_train=True, batch_size=batch_size, num_workers=num_workers)
+def get_train_dataloader(dataset_name: str, batch_size: int = 32, num_workers: int = 2,
+                         model_type: str = 'vit') -> DataLoader:
+    return _create_dataloader(dataset_name, is_train=True, batch_size=batch_size,
+                              num_workers=num_workers, model_type=model_type)
 
-def get_test_dataloader(dataset_name: str, batch_size: int = 32, num_workers: int = 2) -> DataLoader:
-    return _create_dataloader(dataset_name, is_train=False, batch_size=batch_size, num_workers=num_workers)
+def get_test_dataloader(dataset_name: str, batch_size: int = 32, num_workers: int = 2,
+                        model_type: str = 'vit') -> DataLoader:
+    return _create_dataloader(dataset_name, is_train=False, batch_size=batch_size,
+                              num_workers=num_workers, model_type=model_type)
