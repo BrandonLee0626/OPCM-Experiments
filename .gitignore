@@ -16,6 +16,7 @@ mlflow.db
 
 # Results
 result.txt
+results/
 
 # Scripts
 scripts/

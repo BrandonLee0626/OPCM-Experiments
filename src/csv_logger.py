@@ -1,0 +1,131 @@
+import csv
+import json
+import os
+from datetime import datetime
+
+
+class CSVLogger:
+    def __init__(self, save_dir, tasks, single_task_accs, alpha):
+        """
+        tasks: list of task names in merge order
+        single_task_accs: dict {task_name: acc} loaded from result.txt
+        """
+        self.save_dir = save_dir
+        self.tasks = tasks
+        self.single_task_accs = single_task_accs
+        self.alpha = alpha
+
+        # task -> accuracy when first merged (for forgetting computation)
+        self.first_merge_accs = {}
+
+        os.makedirs(save_dir, exist_ok=True)
+
+        with open(os.path.join(save_dir, 'config.json'), 'w') as f:
+            json.dump({
+                'alpha': alpha,
+                'tasks': tasks,
+                'single_task_accs': single_task_accs,
+                'timestamp': datetime.now().isoformat(),
+            }, f, indent=2)
+
+        task_headers = ['step', 'merged_tasks'] + tasks
+        for filename in ['accuracy.csv', 'drop_vs_single.csv', 'forgetting.csv']:
+            self._write_row(filename, task_headers, mode='w')
+
+        self._write_row(
+            'projection_metrics.csv',
+            ['step', 'added_task', 'inner_product', 'inner_product_with_first', 'approx_error', 'avg_rank'],
+            mode='w',
+        )
+
+        self._layer_ranks_initialized = False
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def log_accuracies(self, step, merged_tasks, accuracies):
+        """
+        merged_tasks: list of task names merged so far (in order)
+        accuracies: dict {task_name: acc}
+        """
+        for task in merged_tasks:
+            if task not in self.first_merge_accs:
+                self.first_merge_accs[task] = accuracies.get(task)
+
+        label = '+'.join(merged_tasks)
+
+        # --- accuracy.csv ---
+        self._write_row('accuracy.csv', [step, label] + [
+            round(accuracies[t], 6) if t in accuracies else '' for t in self.tasks
+        ])
+
+        # --- drop_vs_single.csv ---
+        self._write_row('drop_vs_single.csv', [step, label] + [
+            round(self.single_task_accs[t] - accuracies[t], 6)
+            if t in accuracies and t in self.single_task_accs else ''
+            for t in self.tasks
+        ])
+
+        # --- forgetting.csv (drop from first merge) ---
+        self._write_row('forgetting.csv', [step, label] + [
+            round(self.first_merge_accs[t] - accuracies[t], 6)
+            if t in accuracies and t in self.first_merge_accs and self.first_merge_accs[t] is not None else ''
+            for t in self.tasks
+        ])
+
+    def log_projection_metrics(self, step, added_task, metrics):
+        """
+        metrics: dict with keys inner_product, inner_product_with_first, approx_error, rank
+        """
+        def to_float(v):
+            return float(v) if hasattr(v, '__float__') else v
+
+        self._write_row('projection_metrics.csv', [
+            step,
+            added_task,
+            round(to_float(metrics.get('inner_product', 0)), 6),
+            round(to_float(metrics.get('inner_product_with_first', 0)), 6),
+            round(to_float(metrics.get('approx_error', 0)), 6),
+            round(to_float(metrics.get('rank', 0)), 6),
+        ])
+
+    def log_layer_ranks(self, step, added_task, rank_count_dict):
+        """
+        rank_count_dict: {layer_name: cumulative_rank}
+        """
+        layer_names = list(rank_count_dict.keys())
+
+        if not self._layer_ranks_initialized:
+            self._write_row(
+                'layer_ranks.csv',
+                ['step', 'added_task'] + layer_names,
+                mode='w',
+            )
+            self._layer_ranks_initialized = True
+
+        self._write_row('layer_ranks.csv', [step, added_task] + list(rank_count_dict.values()))
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _write_row(self, filename, row, mode='a'):
+        path = os.path.join(self.save_dir, filename)
+        with open(path, mode, newline='') as f:
+            csv.writer(f).writerow(row)
+
+
+def load_single_task_accs(result_txt_path='result.txt'):
+    """Parse result.txt into {task_name: accuracy} dict."""
+    accs = {}
+    with open(result_txt_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split()
+            if len(parts) == 2:
+                task, acc = parts
+                accs[task] = float(acc)
+    return accs
