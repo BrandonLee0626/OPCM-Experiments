@@ -5,28 +5,37 @@ from datetime import datetime
 
 
 class CSVLogger:
-    def __init__(self, save_dir, tasks, single_task_accs, alpha):
+    def __init__(self, save_dir, tasks, single_task_accs, args):
         """
         tasks: list of task names in merge order
         single_task_accs: dict {task_name: acc} loaded from result.txt
+        args: argparse.Namespace from main
         """
         self.save_dir = save_dir
         self.tasks = tasks
         self.single_task_accs = single_task_accs
-        self.alpha = alpha
+        self.alpha = args.alpha
 
         # task -> accuracy when first merged (for forgetting computation)
         self.first_merge_accs = {}
 
         os.makedirs(save_dir, exist_ok=True)
 
+        arch_str = args.clip_arch if args.model == 'clip' else args.vit_arch
+        head_type = args.head_type if args.model == 'clip' else 'linear'
+        config = {
+            'timestamp': datetime.now().isoformat(),
+            'model': args.model,
+            'arch': arch_str,
+            'head_type': head_type,
+            'alpha': args.alpha,
+            'num_tasks': args.num_tasks,
+            'shuffle': args.shuffle,
+            'task_order': tasks,
+            'single_task_accs': single_task_accs,
+        }
         with open(os.path.join(save_dir, 'config.json'), 'w') as f:
-            json.dump({
-                'alpha': alpha,
-                'tasks': tasks,
-                'single_task_accs': single_task_accs,
-                'timestamp': datetime.now().isoformat(),
-            }, f, indent=2)
+            json.dump(config, f, indent=2)
 
         task_headers = ['step', 'merged_tasks'] + tasks
         for filename in ['accuracy.csv', 'drop_vs_single.csv', 'forgetting.csv']:

@@ -39,9 +39,10 @@ def load_task_vector(task, device, model_type='vit', clip_arch='ViT-B-32', vit_a
     return model.get_task_vector()
 
 def load_task_vectors(device, model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_base_patch16_224',
-                      head_type='zeroshot'):
+                      head_type='zeroshot', task_list=None):
+    tasks = task_list if task_list is not None else list(num_classes_per_task.keys())
     return [load_task_vector(task, device, model_type, clip_arch, vit_arch, head_type)
-            for task in num_classes_per_task]
+            for task in tasks]
 
 # Cache key: (task_name, model_type)
 _test_dataloader_cache: dict = {}

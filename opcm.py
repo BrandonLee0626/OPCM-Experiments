@@ -8,6 +8,9 @@ from src.model import MultiTaskViT, MultiTaskCLIP, MultiTaskCLIPLinear
 from src.task_vector import TaskVector
 from src.utils import load_task_vectors, evaluate_model, evaluate_task, frobenius_inner_product
 
+TASKS_8 = ['SUN397', 'Cars', 'RESISC45', 'EuroSAT', 'SVHN', 'GTSRB', 'MNIST', 'DTD']
+TASKS_14 = TASKS_8 + ['Flowers102', 'PCAM', 'OxfordIIITPet', 'STL10', 'CIFAR100', 'FashionMNIST']
+
 
 # ---------------------------------------------------------------------------
 # Multi-GPU parallel evaluation
@@ -221,8 +224,24 @@ def main(args):
         model = MultiTaskViT(vit_arch=vit_arch)
     model.to(device)
 
+    if args.num_tasks == '8':
+        task_list = TASKS_8
+    elif args.num_tasks == '14':
+        task_list = TASKS_14
+    else:
+        task_list = None  # all tasks from num_classes_per_task.json
+
+    if args.shuffle:
+        import random
+        if task_list is None:
+            import json as _json
+            with open(os.path.join('dataset', 'num_classes_per_task.json')) as _f:
+                task_list = list(_json.load(_f).keys())
+        random.shuffle(task_list)
+        print(f'Task order (shuffled): {task_list}')
+
     task_vectors = load_task_vectors(device, model_type=model_type, clip_arch=clip_arch, vit_arch=vit_arch,
-                                     head_type=head_type)
+                                     head_type=head_type, task_list=task_list)
     tasks = [tv.trained_task_names[0] for tv in task_vectors]
 
     # --- Multi-GPU replicas ---
@@ -248,8 +267,9 @@ def main(args):
         from src.csv_logger import CSVLogger, load_single_task_accs
         single_task_accs = load_single_task_accs(result_txt)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        save_dir = f'results/{timestamp}_{model_type}_{head_type}_{arch_str}_alpha{alpha}'
-        csv_logger = CSVLogger(save_dir, tasks, single_task_accs, alpha)
+        shuffle_suffix = '_shuffled' if args.shuffle else ''
+        save_dir = f'results/{timestamp}_{model_type}_{head_type}_{arch_str}_tasks{args.num_tasks}_alpha{alpha}{shuffle_suffix}'
+        csv_logger = CSVLogger(save_dir, tasks, single_task_accs, args)
         print(f'CSV results will be saved to: {save_dir}')
 
     n_tasks = len(tasks)
@@ -327,6 +347,20 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
 
     parser.add_argument('--alpha', type=float, default=0.5)
+    parser.add_argument(
+        '--num_tasks',
+        choices=['8', '14', 'all'],
+        default='all',
+        help='Number of tasks to use: 8 (SUN397/Cars/RESISC45/EuroSAT/SVHN/GTSRB/MNIST/DTD), '
+             '14 (8 + Flowers102/PCAM/OxfordIIITPet/STL10/CIFAR100/FashionMNIST), '
+             'all (default)',
+    )
+    parser.add_argument(
+        '--shuffle',
+        action='store_true',
+        default=False,
+        help='Randomly shuffle task merge order',
+    )
     parser.add_argument(
         '--monitor',
         choices=['mlflow', 'csv', 'both'],
