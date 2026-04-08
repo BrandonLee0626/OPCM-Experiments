@@ -1,6 +1,6 @@
 # OPCM Reproduction & Experiments
 
-This repository reproduces **OPCM (Orthogonal Projection for Continual Merging)**, published at NeurIPS 2025, and conducts additional experiments on top of it.
+This repository reproduces **OPCM (Orthogonal Projection-based Continual Merging)**, published at NeurIPS 2025, and conducts additional experiments on top of it.
 
 Official repository: [tanganke/opcm](https://github.com/tanganke/opcm) | Project page: [tanganke.github.io/opcm](https://tanganke.github.io/opcm/)
 
@@ -120,6 +120,6 @@ Both training and evaluation automatically detect available GPUs. When multiple 
 
 ## Reference
 
-> **OPCM: Orthogonal Projection for Continual Merging**
+> **OPCM: Orthogonal Projection-based Continual Merging**
 > NeurIPS 2025
 > [https://github.com/tanganke/opcm](https://github.com/tanganke/opcm)
