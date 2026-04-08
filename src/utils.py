@@ -19,21 +19,29 @@ def svd(w):
 def frobenius_inner_product(w1, w2):
     return torch.trace(w1.T @ w2).item()
 
-def load_task_vector(task, device, model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_base_patch16_224'):
+def load_task_vector(task, device, model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_base_patch16_224',
+                     head_type='zeroshot'):
     if model_type == 'clip':
-        from .model import SingleTaskCLIP
-        path = os.path.join('models', 'clip', clip_arch, f'clip_{clip_arch}_{task}.pt')
-        model = SingleTaskCLIP(task_name=task, clip_arch=clip_arch).to(device)
+        if head_type == 'linear':
+            from .model import SingleTaskCLIPLinear
+            path = os.path.join('models', 'clip_linear', clip_arch, f'clip_{clip_arch}_{task}.pt')
+            model = SingleTaskCLIPLinear(task_name=task, clip_arch=clip_arch).to(device)
+        else:  # zeroshot
+            from .model import SingleTaskCLIP
+            path = os.path.join('models', 'clip_zeroshot', clip_arch, f'clip_{clip_arch}_{task}.pt')
+            model = SingleTaskCLIP(task_name=task, clip_arch=clip_arch).to(device)
     else:
         from .model import SingleTaskViT
         path = os.path.join('models', 'vit', vit_arch, f'vit_{vit_arch}_{task}.pt')
         model = SingleTaskViT(task_name=task, vit_arch=vit_arch).to(device)
 
-    model.load_state_dict(torch.load(path, map_location=device, weights_only=True))
+    model.load_state_dict(torch.load(path, map_location=device, weights_only=True), strict=False)
     return model.get_task_vector()
 
-def load_task_vectors(device, model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_base_patch16_224'):
-    return [load_task_vector(task, device, model_type, clip_arch, vit_arch) for task in num_classes_per_task]
+def load_task_vectors(device, model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_base_patch16_224',
+                      head_type='zeroshot'):
+    return [load_task_vector(task, device, model_type, clip_arch, vit_arch, head_type)
+            for task in num_classes_per_task]
 
 # Cache key: (task_name, model_type)
 _test_dataloader_cache: dict = {}

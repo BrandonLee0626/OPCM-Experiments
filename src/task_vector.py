@@ -13,7 +13,7 @@ class TaskVector():
         for parameter_name in pretrained:
             self.backbone[parameter_name] = finetuned[parameter_name] - pretrained[parameter_name].to(finetuned[parameter_name].device)
 
-            if 'weight' in parameter_name and any(k in parameter_name for k in ['attn', 'mlp']):
+            if any(k in parameter_name for k in ['weight', 'proj']) and self.backbone[parameter_name].dim() == 2:
                 self.linear_weight_list.append(parameter_name)
 
         for task_name in task_names:

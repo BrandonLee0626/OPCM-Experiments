@@ -1,9 +1,10 @@
+import os
 import torch
 import copy, math, argparse, threading
 from datetime import datetime
 from queue import Queue
 
-from src.model import MultiTaskViT, MultiTaskCLIP
+from src.model import MultiTaskViT, MultiTaskCLIP, MultiTaskCLIPLinear
 from src.task_vector import TaskVector
 from src.utils import load_task_vectors, evaluate_model, evaluate_task, frobenius_inner_product
 
@@ -18,21 +19,29 @@ def _make_gpu_replicas(source_model, n_gpus):
     for gpu_id in range(n_gpus):
         dev = torch.device(f'cuda:{gpu_id}')
         replica = copy.deepcopy(source_model).to(dev)
+        # plain-dict tensors (e.g. CLIP zero-shot weights) are not moved by .to()
+        if hasattr(replica, 'zeroshot_weights'):
+            replica.zeroshot_weights = {
+                k: v.to(dev) for k, v in replica.zeroshot_weights.items()
+            }
         replica.eval()
         replicas.append((replica, dev))
     return replicas
 
 def _sync_replicas(source_model, replicas):
-    """Copy updated backbone + head weights from source_model to every replica."""
+    """Copy updated backbone (and heads if present) from source_model to every replica."""
     backbone_cpu = {k: v.cpu() for k, v in source_model.backbone.state_dict().items()}
-    heads_cpu = {
-        name: {k: v.cpu() for k, v in head.state_dict().items()}
-        for name, head in source_model.heads.items()
-    }
+    heads_cpu = None
+    if hasattr(source_model, 'heads'):
+        heads_cpu = {
+            name: {k: v.cpu() for k, v in head.state_dict().items()}
+            for name, head in source_model.heads.items()
+        }
     for replica, dev in replicas:
         replica.backbone.load_state_dict({k: v.to(dev) for k, v in backbone_cpu.items()})
-        for name, state in heads_cpu.items():
-            replica.heads[name].load_state_dict({k: v.to(dev) for k, v in state.items()})
+        if heads_cpu is not None:
+            for name, state in heads_cpu.items():
+                replica.heads[name].load_state_dict({k: v.to(dev) for k, v in state.items()})
 
 def evaluate_parallel(replicas, tasks, model_type='vit'):
     """
@@ -179,6 +188,7 @@ def main(args):
     model_type = args.model
     clip_arch = args.clip_arch
     vit_arch = args.vit_arch
+    head_type = args.head_type if model_type == 'clip' else 'linear'
 
     use_mlflow = monitor in ('mlflow', 'both')
     use_csv = monitor in ('csv', 'both')
@@ -200,15 +210,19 @@ def main(args):
             print(f'  cuda:{i}  {name}')
 
     arch_str = clip_arch if model_type == 'clip' else vit_arch
-    print(f'Model: {model_type} ({arch_str})')
+    print(f'Model: {model_type} ({arch_str}), head_type: {head_type}')
 
     if model_type == 'clip':
-        model = MultiTaskCLIP(clip_arch=clip_arch)
+        if head_type == 'linear':
+            model = MultiTaskCLIPLinear(clip_arch=clip_arch)
+        else:
+            model = MultiTaskCLIP(clip_arch=clip_arch)
     else:
         model = MultiTaskViT(vit_arch=vit_arch)
     model.to(device)
 
-    task_vectors = load_task_vectors(device, model_type=model_type, clip_arch=clip_arch, vit_arch=vit_arch)
+    task_vectors = load_task_vectors(device, model_type=model_type, clip_arch=clip_arch, vit_arch=vit_arch,
+                                     head_type=head_type)
     tasks = [tv.trained_task_names[0] for tv in task_vectors]
 
     # --- Multi-GPU replicas ---
@@ -223,13 +237,18 @@ def main(args):
         return evaluate_model(model, tasks_to_eval, model_type=model_type)
 
     # --- CSV logger setup ---
-    result_txt = f'result_{model_type}_{arch_str}.txt'
+    if model_type == 'clip':
+        result_txt = os.path.join('results', 'single_task_accuracy', 'clip',
+                                  f'result_clip_{head_type}_{arch_str}.txt')
+    else:
+        result_txt = os.path.join('results', 'single_task_accuracy', 'vit',
+                                  f'result_vit_{arch_str}.txt')
     csv_logger = None
     if use_csv:
         from src.csv_logger import CSVLogger, load_single_task_accs
         single_task_accs = load_single_task_accs(result_txt)
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        save_dir = f'results/{timestamp}_{model_type}_{arch_str}_alpha{alpha}'
+        save_dir = f'results/{timestamp}_{model_type}_{head_type}_{arch_str}_alpha{alpha}'
         csv_logger = CSVLogger(save_dir, tasks, single_task_accs, alpha)
         print(f'CSV results will be saved to: {save_dir}')
 
@@ -332,6 +351,14 @@ if __name__ == '__main__':
         default='vit_base_patch16_224',
         help='ViT architecture (only used when --model vit)',
     )
+    parser.add_argument(
+        '--head_type',
+        choices=['zeroshot', 'linear'],
+        default='zeroshot',
+        help='Inference head type for CLIP (ignored for vit): '
+             'zeroshot uses text embeddings, linear uses a trained classification head '
+             '(default: zeroshot)',
+    )
 
     args = parser.parse_args()
 
@@ -343,6 +370,7 @@ if __name__ == '__main__':
             mlflow.log_param('model', args.model)
             if args.model == 'clip':
                 mlflow.log_param('clip_arch', args.clip_arch)
+                mlflow.log_param('head_type', args.head_type)
             main(args)
     else:
         main(args)
