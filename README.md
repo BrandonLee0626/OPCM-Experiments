@@ -44,6 +44,14 @@ CLIP supports two classification head types:
 18 image classification datasets:
 MNIST, FashionMNIST, EMNIST, CIFAR10, CIFAR100, STL10, SVHN, GTSRB, EuroSAT, RESISC45, PCAM, RenderedSST2, Flowers102, OxfordIIITPet, Food101, Cars, DTD, SUN397
 
+Three preset task subsets are available via `--num_tasks`:
+
+| `--num_tasks` | Tasks |
+|---------------|-------|
+| `8` | SUN397, Cars, RESISC45, EuroSAT, SVHN, GTSRB, MNIST, DTD |
+| `14` | above 8 + Flowers102, PCAM, OxfordIIITPet, STL10, CIFAR100, FashionMNIST |
+| `all` | all 18 tasks (default) |
+
 ## Usage
 
 ### 1. Fine-tune single-task models
@@ -84,6 +92,12 @@ python opcm.py --model clip --clip_arch ViT-B-32 --head_type linear --alpha 0.5
 
 # ViT
 python opcm.py --model vit --vit_arch vit_base_patch16_224 --alpha 0.5
+
+# Use only 8-task subset
+python opcm.py --model clip --clip_arch ViT-B-32 --num_tasks 8
+
+# Use 14-task subset with random task order
+python opcm.py --model clip --clip_arch ViT-B-32 --num_tasks 14 --shuffle
 ```
 
 #### Key arguments
@@ -95,11 +109,13 @@ python opcm.py --model vit --vit_arch vit_base_patch16_224 --alpha 0.5
 | `--clip_arch` | `ViT-B-32` | CLIP architecture (used when `--model clip`) |
 | `--vit_arch` | `vit_base_patch16_224` | ViT architecture (used when `--model vit`) |
 | `--head_type` | `zeroshot` | CLIP head type: `zeroshot` or `linear` |
+| `--num_tasks` | `all` | Task subset: `8`, `14`, or `all` |
+| `--shuffle` | `False` | Randomly shuffle task merge order |
 | `--monitor` | `csv` | Logging backend: `csv`, `mlflow`, or `both` |
 
 ## Logging & Results
 
-CSV results are saved to `results/{timestamp}_{model}_{head}_{arch}_alpha{alpha}/`:
+CSV results are saved to `results/{timestamp}_{model}_{head}_{arch}_tasks{num_tasks}_alpha{alpha}[_shuffled]/`:
 
 | File | Contents |
 |------|----------|
@@ -108,7 +124,7 @@ CSV results are saved to `results/{timestamp}_{model}_{head}_{arch}_alpha{alpha}
 | `forgetting.csv` | Forgetting since each task's first merge |
 | `projection_metrics.csv` | Frobenius inner product, approximation error, average split rank |
 | `layer_ranks.csv` | Cumulative split rank per linear layer |
-| `config.json` | Run configuration and single-task accuracy baselines |
+| `config.json` | Run configuration: model, arch, alpha, num_tasks, shuffle, task_order, single-task accuracy baselines |
 
 MLflow logging is also supported (`--monitor mlflow` or `--monitor both`).
 
