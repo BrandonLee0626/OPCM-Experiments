@@ -116,12 +116,15 @@ def mixed_criterion(criterion, pred, y_a, y_b, lam):
 # ── Training ─────────────────────────────────────────────────────────────────
 def train_and_evaluate(model, train_loader, test_loader, device,
                        epochs, lr, warmup_epochs, patience, mixup_alpha, lr_decay, save_path,
-                       gpu_id=0, task_name=''):
+                       gpu_id=0, task_name='', mode='ft'):
     use_amp = device.type == 'cuda'
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
-    param_groups = get_param_groups(model, lr, weight_decay=0.01, lr_decay=lr_decay)
-    optimizer = optim.AdamW(param_groups)
+    if mode == 'lp':
+        optimizer = optim.AdamW(model.head.parameters(), lr=lr, weight_decay=0.01)
+    else:  # ft
+        param_groups = get_param_groups(model, lr, weight_decay=0.01, lr_decay=lr_decay)
+        optimizer = optim.AdamW(param_groups)
 
     warmup   = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs)
     cosine   = CosineAnnealingLR(optimizer, T_max=max(epochs - warmup_epochs, 1), eta_min=lr * 0.01)
@@ -136,6 +139,8 @@ def train_and_evaluate(model, train_loader, test_loader, device,
     for epoch in range(epochs):
         # ── Train ─────────────────────────────────────────────────────────
         model.train()
+        if mode == 'lp':
+            model.backbone.eval()
         correct_train = total_train = 0
 
         pbar = tqdm(train_loader, desc=f"[cuda:{gpu_id}|{task_name}] {epoch+1}/{epochs}",
@@ -209,7 +214,7 @@ def train_and_evaluate(model, train_loader, test_loader, device,
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
-def run_single_task_experiments(vit_arch='vit_base_patch16_224', tasks=None):
+def run_single_task_experiments(vit_arch='vit_base_patch16_224', tasks=None, mode='ft'):
     n_gpus = torch.cuda.device_count()
     if n_gpus == 0:
         print('Device: CPU')
@@ -223,9 +228,12 @@ def run_single_task_experiments(vit_arch='vit_base_patch16_224', tasks=None):
             print(f'  cuda:{i}  {torch.cuda.get_device_name(i)}')
         devices = [torch.device(f'cuda:{i}') for i in range(n_gpus)]
 
-    print(f'ViT arch: {vit_arch}')
+    if mode == 'lp-ft':
+        raise NotImplementedError("mode='lp-ft' is not yet implemented.")
 
-    save_dir = os.path.join('models', 'vit', vit_arch)
+    print(f'ViT arch: {vit_arch}, mode: {mode}')
+
+    save_dir = os.path.join('models', 'vit', vit_arch, mode)
     os.makedirs(save_dir, exist_ok=True)
 
     # Only retrain datasets that did not reach 95% accuracy
@@ -252,6 +260,8 @@ def run_single_task_experiments(vit_arch='vit_base_patch16_224', tasks=None):
         try:
             tprint(f"[cuda:{gpu_id}|{task_name}] Starting  arch={vit_arch}  lr={cfg['lr']}  epochs={cfg['epochs']}  bs={cfg['bs']}")
             model = SingleTaskViT(task_name=task_name, vit_arch=vit_arch).to(device)
+            if mode == 'lp':
+                model.backbone.requires_grad_(False)
             if os.path.exists(save_path):
                 model.load_state_dict(torch.load(save_path, map_location=device, weights_only=True))
                 tprint(f"[cuda:{gpu_id}|{task_name}] Loaded existing checkpoint")
@@ -269,6 +279,7 @@ def run_single_task_experiments(vit_arch='vit_base_patch16_224', tasks=None):
                 save_path     = save_path,
                 gpu_id        = gpu_id,
                 task_name     = task_name,
+                mode          = mode,
             )
             with results_lock:
                 results[task_name] = best_acc
@@ -295,7 +306,7 @@ def run_single_task_experiments(vit_arch='vit_base_patch16_224', tasks=None):
         else:
             print(f"  {name:<20} FAILED")
 
-    result_path = os.path.join('results', 'single_task_accuracy', 'vit',
+    result_path = os.path.join('results', 'single_task_accuracy', 'vit', mode,
                                f'result_vit_{vit_arch}.txt')
     os.makedirs(os.path.dirname(result_path), exist_ok=True)
     with open(result_path, 'a') as f:
@@ -312,5 +323,8 @@ if __name__ == '__main__':
                         default='vit_base_patch16_224')
     parser.add_argument('--tasks', nargs='+', default=None,
                         help='Specific tasks to train (default: below-95%% targets)')
+    parser.add_argument('--mode', choices=['ft', 'lp', 'lp-ft'], default='ft',
+                        help='Training mode: ft (full fine-tuning), lp (linear probe), '
+                             'lp-ft (not implemented)')
     args = parser.parse_args()
-    run_single_task_experiments(vit_arch=args.vit_arch, tasks=args.tasks)
+    run_single_task_experiments(vit_arch=args.vit_arch, tasks=args.tasks, mode=args.mode)

@@ -57,20 +57,36 @@ Three preset task subsets are available via `--num_tasks`:
 ### 1. Fine-tune single-task models
 
 ```bash
-# ViT
+# ViT — full fine-tuning (default)
 python scripts/train_single_task_vit.py --vit_arch vit_base_patch16_224
 
-# CLIP (zero-shot head, default)
+# ViT — linear probe (backbone frozen, head only)
+python scripts/train_single_task_vit.py --vit_arch vit_base_patch16_224 --mode lp
+
+# CLIP (zero-shot head) — mode flag not applicable, always full fine-tuning
 python scripts/train_single_task_clip.py --clip_arch ViT-B-32 --head_type zeroshot
 
-# CLIP (linear head)
+# CLIP (linear head) — full fine-tuning
 python scripts/train_single_task_clip.py --clip_arch ViT-B-32 --head_type linear
+
+# CLIP (linear head) — linear probe
+python scripts/train_single_task_clip.py --clip_arch ViT-B-32 --head_type linear --mode lp
 
 # Train specific tasks only
 python scripts/train_single_task_clip.py --clip_arch ViT-B-32 --tasks CIFAR10 SUN397
 ```
 
-Checkpoints are saved to `models/{vit,clip_zeroshot,clip_linear}/{arch}/`.
+#### Training mode (`--mode`)
+
+| Value | Description |
+|-------|-------------|
+| `ft` | Full fine-tuning — all parameters updated (default) |
+| `lp` | Linear probe — backbone frozen, only classification head trained |
+| `lp-ft` | Not yet implemented |
+
+> `--mode` is ignored when `--head_type zeroshot` (CLIP only).
+
+Checkpoints are saved to `models/{vit,clip_zeroshot,clip_linear}/{arch}/{mode}/`.
 
 ### 2. Evaluate single-task checkpoints
 
@@ -79,7 +95,7 @@ python scripts/evaluate_model.py --model clip --clip_arch ViT-B-32 --head_type z
 python scripts/evaluate_model.py --model vit  --vit_arch vit_base_patch16_224
 ```
 
-Results are appended to `results/single_task_accuracy/{model_type}/result_*.txt`.
+Results are appended to `results/single_task_accuracy/{model_type}/{mode}/result_*.txt`.
 
 ### 3. Run OPCM merging
 

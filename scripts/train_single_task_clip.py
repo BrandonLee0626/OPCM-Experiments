@@ -90,12 +90,15 @@ def get_param_groups(model, lr: float, weight_decay: float, lr_decay: float = 0.
 # ── Training ──────────────────────────────────────────────────────────────────
 def train_and_evaluate(model, train_loader, test_loader, device,
                        epochs, lr, warmup_epochs, patience, save_path,
-                       gpu_id=0, task_name=''):
+                       gpu_id=0, task_name='', mode='ft'):
     use_amp = device.type == 'cuda'
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
-    param_groups = get_param_groups(model, lr, weight_decay=0.01)
-    optimizer = optim.AdamW(param_groups)
+    if mode == 'lp':
+        optimizer = optim.AdamW(model.head.parameters(), lr=lr, weight_decay=0.01)
+    else:  # ft
+        param_groups = get_param_groups(model, lr, weight_decay=0.01)
+        optimizer = optim.AdamW(param_groups)
 
     warmup  = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs)
     cosine  = CosineAnnealingLR(optimizer, T_max=max(epochs - warmup_epochs, 1), eta_min=lr * 0.01)
@@ -110,6 +113,8 @@ def train_and_evaluate(model, train_loader, test_loader, device,
     for epoch in range(epochs):
         # ── Train ─────────────────────────────────────────────────────────
         model.train()
+        if mode == 'lp':
+            model.backbone.eval()
         correct_train = total_train = 0
 
         pbar = tqdm(train_loader, desc=f"[cuda:{gpu_id}|{task_name}] {epoch+1}/{epochs}",
@@ -172,7 +177,7 @@ def train_and_evaluate(model, train_loader, test_loader, device,
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zeroshot'):
+def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zeroshot', mode='ft'):
     n_gpus = torch.cuda.device_count()
     if n_gpus == 0:
         print('Device: CPU')
@@ -186,10 +191,16 @@ def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zer
             print(f'  cuda:{i}  {torch.cuda.get_device_name(i)}')
         devices = [torch.device(f'cuda:{i}') for i in range(n_gpus)]
 
-    save_root = f'models/clip_{head_type}'
-    print(f'CLIP arch: {clip_arch}, head_type: {head_type}')
+    if head_type == 'zeroshot' and mode != 'ft':
+        print(f'[Warning] --mode={mode} is not applicable to head_type=zeroshot; using ft.')
+        mode = 'ft'
+    if mode == 'lp-ft':
+        raise NotImplementedError("mode='lp-ft' is not yet implemented.")
 
-    save_dir = os.path.join(save_root, clip_arch)
+    save_root = f'models/clip_{head_type}'
+    print(f'CLIP arch: {clip_arch}, head_type: {head_type}, mode: {mode}')
+
+    save_dir = os.path.join(save_root, clip_arch, mode)
     os.makedirs(save_dir, exist_ok=True)
 
     target_tasks = [(name, DATASET_CONFIGS[name])
@@ -228,6 +239,8 @@ def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zer
                     model = SingleTaskCLIPLinear(task_name=task_name, clip_arch=clip_arch).to(device)
                 else:
                     model = SingleTaskCLIP(task_name=task_name, clip_arch=clip_arch).to(device)
+                if mode == 'lp':
+                    model.backbone.requires_grad_(False)
                 if os.path.exists(save_path):
                     model.load_state_dict(torch.load(save_path, map_location=device, weights_only=True), strict=False)
                     tprint(f"[cuda:{gpu_id}|{task_name}] Loaded existing checkpoint")
@@ -243,6 +256,7 @@ def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zer
                 save_path     = save_path,
                 gpu_id        = gpu_id,
                 task_name     = task_name,
+                mode          = mode,
             )
             with results_lock:
                 results[task_name] = best_acc
@@ -268,7 +282,7 @@ def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zer
         else:
             print(f"  {name:<20} FAILED")
 
-    result_path = os.path.join('results', 'single_task_accuracy', 'clip',
+    result_path = os.path.join('results', 'single_task_accuracy', 'clip', mode,
                                f'result_clip_{head_type}_{clip_arch}.txt')
     os.makedirs(os.path.dirname(result_path), exist_ok=True)
     with open(result_path, 'a') as f:
@@ -287,6 +301,10 @@ if __name__ == '__main__':
     parser.add_argument('--head_type', choices=['zeroshot', 'linear'], default='zeroshot',
                         help='Classification head type: zeroshot (text embeddings) or linear '
                              '(default: zeroshot)')
+    parser.add_argument('--mode', choices=['ft', 'lp', 'lp-ft'], default='ft',
+                        help='Training mode: ft (full fine-tuning), lp (linear probe), '
+                             'lp-ft (not implemented). Ignored when head_type=zeroshot.')
     args = parser.parse_args()
 
-    run_single_task_experiments(clip_arch=args.clip_arch, tasks=args.tasks, head_type=args.head_type)
+    run_single_task_experiments(clip_arch=args.clip_arch, tasks=args.tasks,
+                                head_type=args.head_type, mode=args.mode)
