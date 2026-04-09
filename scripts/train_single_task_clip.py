@@ -268,7 +268,9 @@ def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zer
         else:
             print(f"  {name:<20} FAILED")
 
-    result_path = f'result_clip_{head_type}_{clip_arch}.txt'
+    result_path = os.path.join('results', 'single_task_accuracy', 'clip',
+                               f'result_clip_{head_type}_{clip_arch}.txt')
+    os.makedirs(os.path.dirname(result_path), exist_ok=True)
     with open(result_path, 'a') as f:
         for name, acc in results.items():
             f.write(f'{name} {acc}\n')

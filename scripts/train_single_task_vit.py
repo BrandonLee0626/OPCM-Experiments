@@ -248,7 +248,7 @@ def run_single_task_experiments(vit_arch='vit_base_patch16_224', tasks=None):
     def train_task(task_name, cfg):
         device = gpu_queue.get()
         gpu_id = device.index if device.type == 'cuda' else 0
-        save_path = os.path.join(save_dir, f"vit_{vit_arch}_{task_name}.pt")
+        save_path = os.path.join(save_dir, f"{vit_arch}_{task_name}.pt")
         try:
             tprint(f"[cuda:{gpu_id}|{task_name}] Starting  arch={vit_arch}  lr={cfg['lr']}  epochs={cfg['epochs']}  bs={cfg['bs']}")
             model = SingleTaskViT(task_name=task_name, vit_arch=vit_arch).to(device)
@@ -295,7 +295,9 @@ def run_single_task_experiments(vit_arch='vit_base_patch16_224', tasks=None):
         else:
             print(f"  {name:<20} FAILED")
 
-    result_path = f'result_vit_{vit_arch}.txt'
+    result_path = os.path.join('results', 'single_task_accuracy', 'vit',
+                               f'result_vit_{vit_arch}.txt')
+    os.makedirs(os.path.dirname(result_path), exist_ok=True)
     with open(result_path, 'a') as f:
         for name, acc in results.items():
             f.write(f'{name} {acc}\n')
