@@ -63,6 +63,9 @@ python scripts/train_single_task_vit.py --vit_arch vit_base_patch16_224
 # ViT — linear probe (backbone frozen, head only)
 python scripts/train_single_task_vit.py --vit_arch vit_base_patch16_224 --mode lp
 
+# ViT — LP then full fine-tuning (requires lp checkpoint)
+python scripts/train_single_task_vit.py --vit_arch vit_base_patch16_224 --mode lp-ft
+
 # CLIP (zero-shot head) — mode flag not applicable, always full fine-tuning
 python scripts/train_single_task_clip.py --clip_arch ViT-B-32 --head_type zeroshot
 
@@ -71,6 +74,9 @@ python scripts/train_single_task_clip.py --clip_arch ViT-B-32 --head_type linear
 
 # CLIP (linear head) — linear probe
 python scripts/train_single_task_clip.py --clip_arch ViT-B-32 --head_type linear --mode lp
+
+# CLIP (linear head) — LP then full fine-tuning (requires lp checkpoint)
+python scripts/train_single_task_clip.py --clip_arch ViT-B-32 --head_type linear --mode lp-ft
 
 # Train specific tasks only
 python scripts/train_single_task_clip.py --clip_arch ViT-B-32 --tasks CIFAR10 SUN397
@@ -81,10 +87,11 @@ python scripts/train_single_task_clip.py --clip_arch ViT-B-32 --tasks CIFAR10 SU
 | Value | Description |
 |-------|-------------|
 | `ft` | Full fine-tuning — all parameters updated (default) |
-| `lp` | Linear probe — backbone frozen, only classification head trained |
-| `lp-ft` | Not yet implemented |
+| `lp` | Linear probe — backbone frozen, only head trained; runs until early stopping (no fixed epoch limit) |
+| `lp-ft` | Load LP checkpoint, then full fine-tuning of backbone + head |
 
 > `--mode` is ignored when `--head_type zeroshot` (CLIP only).
+> `lp-ft`: tasks without a corresponding `lp` checkpoint are skipped with a warning. Run `--mode lp` first.
 
 Checkpoints are saved to `models/{vit,clip_zeroshot,clip_linear}/{arch}/{mode}/`.
 

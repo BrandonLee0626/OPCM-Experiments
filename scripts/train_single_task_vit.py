@@ -1,6 +1,7 @@
 import os
 import sys
 import copy
+import itertools
 import threading
 import numpy as np
 from queue import Queue
@@ -46,6 +47,30 @@ DATASET_CONFIGS = {
     "CIFAR100":      {"lr": 2e-5, "epochs": 50,  "bs": 64,  "warmup": 5,  "patience": 12, "mixup": 0.4, "lr_decay": 0.8},
     "DTD":           {"lr": 1e-5, "epochs": 80,  "bs": 32,  "warmup": 5,  "patience": 20, "mixup": 0.4, "lr_decay": 0.75},
     "SUN397":        {"lr": 1e-5, "epochs": 50,  "bs": 64,  "warmup": 5,  "patience": 15, "mixup": 0.4, "lr_decay": 0.75},
+}
+
+# Linear probe: backbone frozen → only a linear head is trained.
+# No fixed epoch limit — runs until early stopping triggers (epochs key absent).
+# mixup disabled (no benefit for linear probe); lr_decay unused but required by train_and_evaluate.
+LP_DATASET_CONFIGS = {
+    "MNIST":         {"lr": 1e-2, "bs": 256, "warmup": 1,  "patience": 10, "mixup": 0.0, "lr_decay": 1.0},
+    "FashionMNIST":  {"lr": 1e-2, "bs": 256, "warmup": 1,  "patience": 10, "mixup": 0.0, "lr_decay": 1.0},
+    "EMNIST":        {"lr": 1e-2, "bs": 256, "warmup": 1,  "patience": 10, "mixup": 0.0, "lr_decay": 1.0},
+    "CIFAR10":       {"lr": 5e-3, "bs": 256, "warmup": 1,  "patience": 10, "mixup": 0.0, "lr_decay": 1.0},
+    "STL10":         {"lr": 5e-3, "bs": 256, "warmup": 1,  "patience": 10, "mixup": 0.0, "lr_decay": 1.0},
+    "SVHN":          {"lr": 1e-2, "bs": 256, "warmup": 1,  "patience": 10, "mixup": 0.0, "lr_decay": 1.0},
+    "GTSRB":         {"lr": 5e-3, "bs": 256, "warmup": 1,  "patience": 10, "mixup": 0.0, "lr_decay": 1.0},
+    "EuroSAT":       {"lr": 5e-3, "bs": 256, "warmup": 1,  "patience": 10, "mixup": 0.0, "lr_decay": 1.0},
+    "RESISC45":      {"lr": 5e-3, "bs": 256, "warmup": 1,  "patience": 10, "mixup": 0.0, "lr_decay": 1.0},
+    "PCAM":          {"lr": 5e-3, "bs": 256, "warmup": 1,  "patience": 10, "mixup": 0.0, "lr_decay": 1.0},
+    "RenderedSST2":  {"lr": 5e-3, "bs": 256, "warmup": 1,  "patience": 10, "mixup": 0.0, "lr_decay": 1.0},
+    "Flowers102":    {"lr": 5e-3, "bs": 128, "warmup": 1,  "patience": 15, "mixup": 0.0, "lr_decay": 1.0},
+    "OxfordIIITPet": {"lr": 5e-3, "bs": 128, "warmup": 1,  "patience": 15, "mixup": 0.0, "lr_decay": 1.0},
+    "Food101":       {"lr": 5e-3, "bs": 128, "warmup": 1,  "patience": 15, "mixup": 0.0, "lr_decay": 1.0},
+    "Cars":          {"lr": 5e-3, "bs": 128, "warmup": 1,  "patience": 15, "mixup": 0.0, "lr_decay": 1.0},
+    "CIFAR100":      {"lr": 5e-3, "bs": 128, "warmup": 1,  "patience": 15, "mixup": 0.0, "lr_decay": 1.0},
+    "DTD":           {"lr": 5e-3, "bs": 128, "warmup": 1,  "patience": 20, "mixup": 0.0, "lr_decay": 1.0},
+    "SUN397":        {"lr": 5e-3, "bs": 128, "warmup": 1,  "patience": 15, "mixup": 0.0, "lr_decay": 1.0},
 }
 
 
@@ -127,7 +152,8 @@ def train_and_evaluate(model, train_loader, test_loader, device,
         optimizer = optim.AdamW(param_groups)
 
     warmup   = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs)
-    cosine   = CosineAnnealingLR(optimizer, T_max=max(epochs - warmup_epochs, 1), eta_min=lr * 0.01)
+    cosine_tmax = 1000 if epochs is None else max(epochs - warmup_epochs, 1)
+    cosine   = CosineAnnealingLR(optimizer, T_max=cosine_tmax, eta_min=lr * 0.01)
     scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
 
     scaler = GradScaler('cuda', enabled=use_amp)
@@ -135,15 +161,17 @@ def train_and_evaluate(model, train_loader, test_loader, device,
     best_acc = 0.0
     best_state = None
     no_improve = 0
+    epoch_iter = itertools.count() if epochs is None else range(epochs)
+    epoch_total = '?' if epochs is None else epochs
 
-    for epoch in range(epochs):
+    for epoch in epoch_iter:
         # ── Train ─────────────────────────────────────────────────────────
         model.train()
         if mode == 'lp':
             model.backbone.eval()
         correct_train = total_train = 0
 
-        pbar = tqdm(train_loader, desc=f"[cuda:{gpu_id}|{task_name}] {epoch+1}/{epochs}",
+        pbar = tqdm(train_loader, desc=f"[cuda:{gpu_id}|{task_name}] {epoch+1}/{epoch_total}",
                     leave=False, position=gpu_id, dynamic_ncols=True)
         for inputs, labels in pbar:
             inputs  = inputs.to(device, non_blocking=True)
@@ -192,7 +220,7 @@ def train_and_evaluate(model, train_loader, test_loader, device,
 
         test_acc   = correct_test / total_test if total_test > 0 else 0
         current_lr = scheduler.get_last_lr()[0]
-        msg = f"[cuda:{gpu_id}|{task_name}] Epoch {epoch+1:>3}/{epochs} | lr={current_lr:.2e} | test acc={test_acc:.4f}"
+        msg = f"[cuda:{gpu_id}|{task_name}] Epoch {epoch+1:>3}/{epoch_total} | lr={current_lr:.2e} | test acc={test_acc:.4f}"
 
         if test_acc > best_acc:
             best_acc   = test_acc
@@ -228,9 +256,6 @@ def run_single_task_experiments(vit_arch='vit_base_patch16_224', tasks=None, mod
             print(f'  cuda:{i}  {torch.cuda.get_device_name(i)}')
         devices = [torch.device(f'cuda:{i}') for i in range(n_gpus)]
 
-    if mode == 'lp-ft':
-        raise NotImplementedError("mode='lp-ft' is not yet implemented.")
-
     print(f'ViT arch: {vit_arch}, mode: {mode}')
 
     save_dir = os.path.join('models', 'vit', vit_arch, mode)
@@ -241,8 +266,23 @@ def run_single_task_experiments(vit_arch='vit_base_patch16_224', tasks=None, mod
         "EMNIST", "PCAM", "RenderedSST2", "OxfordIIITPet",
         "Food101", "Cars", "CIFAR100", "DTD", "SUN397",
     }
-    target_tasks = [(name, DATASET_CONFIGS[name]) for name in DATASET_CONFIGS
-                    if name in (tasks if tasks else default_targets)]
+    configs = LP_DATASET_CONFIGS if mode == 'lp' else DATASET_CONFIGS
+    default = set(configs.keys()) if mode == 'lp-ft' else default_targets
+    candidate_tasks = [(name, configs[name]) for name in configs
+                       if name in (tasks if tasks else default)]
+
+    if mode == 'lp-ft':
+        missing = [name for name, _ in candidate_tasks
+                   if not os.path.exists(os.path.join('models', 'vit', vit_arch, 'lp', f'{vit_arch}_{name}.pt'))]
+        if missing:
+            print(f'[Warning] No LP checkpoint found for {len(missing)} task(s) — skipping: {missing}')
+        target_tasks = [(name, cfg) for name, cfg in candidate_tasks if name not in missing]
+    else:
+        target_tasks = candidate_tasks
+
+    if not target_tasks:
+        print('No tasks to run. Exiting.')
+        return
 
     print(f'\nTraining {len(target_tasks)} tasks across {len(devices)} device(s).\n')
 
@@ -258,11 +298,17 @@ def run_single_task_experiments(vit_arch='vit_base_patch16_224', tasks=None, mod
         gpu_id = device.index if device.type == 'cuda' else 0
         save_path = os.path.join(save_dir, f"{vit_arch}_{task_name}.pt")
         try:
-            tprint(f"[cuda:{gpu_id}|{task_name}] Starting  arch={vit_arch}  lr={cfg['lr']}  epochs={cfg['epochs']}  bs={cfg['bs']}")
+            tprint(f"[cuda:{gpu_id}|{task_name}] Starting  arch={vit_arch}  lr={cfg['lr']}  epochs={cfg.get('epochs', '∞')}  bs={cfg['bs']}")
             model = SingleTaskViT(task_name=task_name, vit_arch=vit_arch).to(device)
             if mode == 'lp':
                 model.backbone.requires_grad_(False)
-            if os.path.exists(save_path):
+            if mode == 'lp-ft':
+                lp_path = os.path.join('models', 'vit', vit_arch, 'lp', f"{vit_arch}_{task_name}.pt")
+                if not os.path.exists(lp_path):
+                    raise FileNotFoundError(f"LP checkpoint not found: {lp_path}. Run --mode lp first.")
+                model.load_state_dict(torch.load(lp_path, map_location=device, weights_only=True))
+                tprint(f"[cuda:{gpu_id}|{task_name}] Loaded LP checkpoint from {lp_path}")
+            elif os.path.exists(save_path):
                 model.load_state_dict(torch.load(save_path, map_location=device, weights_only=True))
                 tprint(f"[cuda:{gpu_id}|{task_name}] Loaded existing checkpoint")
             train_loader = get_train_dataloader(task_name, batch_size=cfg['bs'])
@@ -270,7 +316,7 @@ def run_single_task_experiments(vit_arch='vit_base_patch16_224', tasks=None, mod
 
             _, best_acc = train_and_evaluate(
                 model, train_loader, test_loader, device,
-                epochs        = cfg['epochs'],
+                epochs        = cfg.get('epochs', None),
                 lr            = cfg['lr'],
                 warmup_epochs = cfg['warmup'],
                 patience      = cfg['patience'],
