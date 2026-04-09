@@ -48,4 +48,4 @@ class TaskVector():
 
     def linear_weight_norm(self):
         sq_norms = torch.stack([self.backbone[name].norm() ** 2 for name in self.linear_weight_list])
-        return sq_norms.sum().sqrt()
+        return sq_norms.sum().sqrt().item()
