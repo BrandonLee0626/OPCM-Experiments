@@ -13,8 +13,9 @@ class TaskVector():
         for parameter_name in pretrained:
             self.backbone[parameter_name] = finetuned[parameter_name] - pretrained[parameter_name].to(finetuned[parameter_name].device)
 
-            if any(k in parameter_name for k in ['weight', 'proj']) and self.backbone[parameter_name].dim() == 2:
-                self.linear_weight_list.append(parameter_name)
+            if any(k in parameter_name for k in ['weight', 'proj']) and self.backbone[parameter_name].dim() in [2, 4]:
+                if 'embed' not in parameter_name and 'position' not in parameter_name:
+                    self.linear_weight_list.append(parameter_name)
 
         for task_name in task_names:
             self.head_weights[task_name] = finetuned_heads
@@ -46,5 +47,5 @@ class TaskVector():
         return {name: svd(self.backbone[name]) for name in self.linear_weight_list}
 
     def linear_weight_norm(self):
-        weights = [self.backbone[name].flatten() for name in self.linear_weight_list]
-        return torch.linalg.norm(torch.cat(weights))
+        sq_norms = torch.stack([self.backbone[name].norm() ** 2 for name in self.linear_weight_list])
+        return sq_norms.sum().sqrt()
