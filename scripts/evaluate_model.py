@@ -53,23 +53,25 @@ def evaluate_saved_models(model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_
             mode = 'ft'
         models_dir = os.path.join('models', f'clip_{head_type}', arch, mode)
         prefix = f'clip_{arch}_'
-        result_path = f'result_clip_{head_type}_{arch}.txt'
         def make_model(task_name, device):
             if head_type == 'linear':
                 return SingleTaskCLIPLinear(task_name=task_name, clip_arch=arch).to(device)
             return SingleTaskCLIP(task_name=task_name, clip_arch=arch).to(device)
     else:
         arch = vit_arch
+        head_type = 'linear'
         models_dir = os.path.join('models', 'vit', arch, mode)
         prefix = f'{arch}_'
-        result_path = f'result_vit_{arch}.txt'
         def make_model(task_name, device):
             return SingleTaskViT(task_name=task_name, vit_arch=arch).to(device)
 
-    result_path = os.path.join('results', 'single_task_accuracy', model_type, mode, result_path)
+    result_path = os.path.join(
+        'results', 'single_task_accuracy', model_type, mode,
+        f'result_{model_type}_{head_type}_{arch}.json',
+    )
     os.makedirs(os.path.dirname(result_path), exist_ok=True)
 
-    head_tag = head_type if model_type == 'clip' else 'linear'
+    head_tag = head_type
     print(f'Model: {model_type} ({arch}), head_type: {head_tag}, mode: {mode}')
     print(f'Models dir: {models_dir}\n{"="*50}')
 
@@ -102,11 +104,11 @@ def evaluate_saved_models(model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_
                 model = make_model(task_name, device)
                 model.load_state_dict(
                     torch.load(model_path, map_location=device, weights_only=True), strict=False)
-            test_loader = get_test_dataloader(task_name, batch_size=64, model_type=model_type)
+            test_loader = get_test_dataloader(task_name, batch_size=64, num_workers=0, model_type=model_type)
             acc = evaluate_model(model, test_loader, device)
             with results_lock:
                 results[task_name] = acc
-            tprint(f'  {task_name:<20} {acc:.4f}')
+            tprint(f'  {task_name:<20} {acc*100:.4f}%')
         except Exception as e:
             tprint(f'  {task_name:<20} ERROR: {e}')
         finally:
@@ -120,11 +122,15 @@ def evaluate_saved_models(model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_
         t.join()
 
     print(f'\n{"="*50}')
+    import json
+    existing = {}
+    if os.path.exists(result_path):
+        with open(result_path) as f:
+            existing = json.load(f)
+    existing.update({task_name: round(results[task_name] * 100, 4) for task_name, _ in tasks if task_name in results})
     with open(result_path, 'w') as f:
-        for task_name, _ in tasks:
-            if task_name in results:
-                f.write(f'{task_name} {results[task_name]}\n')
-    print(f'Results appended to {result_path}')
+        json.dump(existing, f, indent=2)
+    print(f'Results saved to {result_path}')
 
 
 if __name__ == '__main__':

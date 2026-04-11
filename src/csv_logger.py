@@ -62,25 +62,26 @@ class CSVLogger:
         """
         for task in merged_tasks:
             if task not in self.first_merge_accs:
-                self.first_merge_accs[task] = accuracies.get(task)
+                acc = accuracies.get(task)
+                self.first_merge_accs[task] = acc * 100 if acc is not None else None
 
         label = '+'.join(merged_tasks)
 
         # --- accuracy.csv ---
         self._write_row('accuracy.csv', [step, label] + [
-            round(accuracies[t], 6) if t in accuracies else '' for t in self.tasks
+            round(accuracies[t] * 100, 4) if t in accuracies else '' for t in self.tasks
         ])
 
         # --- drop_vs_single.csv ---
         self._write_row('drop_vs_single.csv', [step, label] + [
-            round(self.single_task_accs[t] - accuracies[t], 6)
+            round(self.single_task_accs[t] - accuracies[t] * 100, 4)
             if t in accuracies and t in self.single_task_accs else ''
             for t in self.tasks
         ])
 
         # --- forgetting.csv (drop from first merge) ---
         self._write_row('forgetting.csv', [step, label] + [
-            round(self.first_merge_accs[t] - accuracies[t], 6)
+            round(self.first_merge_accs[t] - accuracies[t] * 100, 4)
             if t in accuracies and t in self.first_merge_accs and self.first_merge_accs[t] is not None else ''
             for t in self.tasks
         ])
@@ -101,11 +102,11 @@ class CSVLogger:
             round(to_float(metrics.get('rank', 0)), 6),
         ])
 
-    def log_layer_ranks(self, step, added_task, rank_count_dict):
+    def log_layer_ranks(self, step, added_task, split_ranks):
         """
-        rank_count_dict: {layer_name: cumulative_rank}
+        split_ranks: {layer_name: split_rank}
         """
-        layer_names = list(rank_count_dict.keys())
+        layer_names = list(split_ranks.keys())
 
         if not self._layer_ranks_initialized:
             self._write_row(
@@ -115,7 +116,7 @@ class CSVLogger:
             )
             self._layer_ranks_initialized = True
 
-        self._write_row('layer_ranks.csv', [step, added_task] + list(rank_count_dict.values()))
+        self._write_row('layer_ranks.csv', [step, added_task] + list(split_ranks.values()))
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -127,16 +128,7 @@ class CSVLogger:
             csv.writer(f).writerow(row)
 
 
-def load_single_task_accs(result_txt_path='result.txt'):
-    """Parse result.txt into {task_name: accuracy} dict."""
-    accs = {}
-    with open(result_txt_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            parts = line.split()
-            if len(parts) == 2:
-                task, acc = parts
-                accs[task] = float(acc)
-    return accs
+def load_single_task_accs(result_json_path):
+    """Load result JSON into {task_name: accuracy} dict."""
+    with open(result_json_path) as f:
+        return json.load(f)

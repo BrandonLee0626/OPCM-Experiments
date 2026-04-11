@@ -108,7 +108,7 @@ python scripts/evaluate_model.py --model clip --clip_arch ViT-B-32 --head_type l
 
 `--mode` selects which checkpoint folder to load (`ft` / `lp` / `lp-ft`, default: `ft`). Ignored when `--head_type zeroshot`.
 
-Results are appended to `results/single_task_accuracy/{model_type}/{mode}/result_*.txt`.
+Results are saved (upsert) to `results/single_task_accuracy/{model_type}/{mode}/result_*.json`. Accuracy values are stored in % scale as plain numbers.
 
 ### 3. Run OPCM merging
 
@@ -143,23 +143,48 @@ python opcm.py --model clip --clip_arch ViT-B-32 --num_tasks 14 --shuffle
 | `--model` | `clip` | Backbone type: `vit` or `clip` |
 | `--clip_arch` | `ViT-B-32` | CLIP architecture (used when `--model clip`) |
 | `--vit_arch` | `vit_base_patch16_224` | ViT architecture (used when `--model vit`) |
-| `--head_type` | `zeroshot` | CLIP head type: `zeroshot` or `linear` |
-| `--mode` | `ft` | Checkpoint mode to load task vectors from: `ft` or `lp-ft` (ignored when `--head_type zeroshot`) |
-| `--num_tasks` | `all` | Task subset: `8`, `14`, or `all` |
+| `--head_type` | `linear` | CLIP head type: `zeroshot` or `linear` |
+| `--mode` | `lp-ft` | Checkpoint mode to load task vectors from: `ft` or `lp-ft` (ignored when `--head_type zeroshot`) |
+| `--num_tasks` | `8` | Task subset: `8`, `14`, or `all` |
 | `--shuffle` | `False` | Randomly shuffle task merge order |
+| `--num_runs` | `1` | Number of times to repeat the experiment; use with `--shuffle` to average over different task orders |
 | `--monitor` | `csv` | Logging backend: `csv`, `mlflow`, or `both` |
 
 ## Logging & Results
 
-CSV results are saved to `results/{timestamp}_{model}_{head}_{arch}_tasks{num_tasks}_alpha{alpha}[_shuffled]/`:
+### Single-task accuracy baselines
+
+Saved to `results/single_task_accuracy/{model}/{mode}/result_*.json`.
+All accuracy values are stored in **% scale** (e.g. `84.6163`). Writing is upsert — only evaluated tasks are updated; existing entries for other tasks are preserved.
+
+### OPCM experiment results
+
+CSV results are saved under a structured path:
+
+```
+results/opcm/{model}/{arch}/{head_type}/{mode}/alpha{alpha}/{timestamp}[_shuffled][_runs{N}]/
+```
+
+For example:
+```
+results/opcm/clip/ViT-B-32/linear/lp-ft/alpha0.3/20260411_143022/
+```
+
+Multi-run experiments add per-run subdirectories and an `average/` directory:
+```
+results/opcm/.../20260411_160000_runs5/
+  run_0/  run_1/  ...  average/
+```
+
+All accuracy values in CSV files are in **% scale** (no `%` symbol, so values are directly usable for numerical computation).
 
 | File | Contents |
 |------|----------|
-| `accuracy.csv` | Per-task accuracy after each merge step |
-| `drop_vs_single.csv` | Accuracy drop relative to single-task baseline |
-| `forgetting.csv` | Forgetting since each task's first merge |
+| `accuracy.csv` | Per-task accuracy (%) after each merge step |
+| `drop_vs_single.csv` | Accuracy drop (% points) relative to single-task baseline |
+| `forgetting.csv` | Forgetting (% points) since each task's first merge |
 | `projection_metrics.csv` | Frobenius inner product, approximation error, average split rank |
-| `layer_ranks.csv` | Cumulative split rank per linear layer |
+| `layer_ranks.csv` | Split rank used at each merge step, per linear layer |
 | `config.json` | Run configuration: model, arch, alpha, num_tasks, shuffle, task_order, single-task accuracy baselines. `mode` is included when `head_type` is `linear` |
 
 MLflow logging is also supported (`--monitor mlflow` or `--monitor both`).

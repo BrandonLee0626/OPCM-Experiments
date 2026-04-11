@@ -182,14 +182,14 @@ def train_and_evaluate(model, train_loader, test_loader, device,
 
         test_acc   = correct_test / total_test if total_test > 0 else 0
         current_lr = scheduler.get_last_lr()[0]
-        msg = f"[cuda:{gpu_id}|{task_name}] Epoch {epoch+1:>3}/{epoch_total} | lr={current_lr:.2e} | test acc={test_acc:.4f}"
+        msg = f"[cuda:{gpu_id}|{task_name}] Epoch {epoch+1:>3}/{epoch_total} | lr={current_lr:.2e} | test acc={test_acc*100:.2f}%"
 
         if test_acc > best_acc:
             best_acc   = test_acc
             best_state = copy.deepcopy(model.state_dict())
             torch.save(best_state, save_path)
             no_improve = 0
-            tprint(msg + f"  ✓ best={best_acc:.4f}")
+            tprint(msg + f"  ✓ best={best_acc*100:.2f}%")
         else:
             no_improve += 1
             tprint(msg)
@@ -305,7 +305,7 @@ def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zer
             )
             with results_lock:
                 results[task_name] = best_acc
-            tprint(f"[cuda:{gpu_id}|{task_name}] Done  best={best_acc:.4f}")
+            tprint(f"[cuda:{gpu_id}|{task_name}] Done  best={best_acc*100:.2f}%")
         except Exception as e:
             tprint(f"[cuda:{gpu_id}|{task_name}] ERROR: {e}")
         finally:
@@ -323,17 +323,22 @@ def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zer
     print("="*60)
     for name, _ in target_tasks:
         if name in results:
-            print(f"  {name:<20} {results[name]:.4f}")
+            print(f"  {name:<20} {results[name]*100:.2f}%")
         else:
             print(f"  {name:<20} FAILED")
 
     result_path = os.path.join('results', 'single_task_accuracy', 'clip', mode,
-                               f'result_clip_{head_type}_{clip_arch}.txt')
+                               f'result_clip_{head_type}_{clip_arch}.json')
     os.makedirs(os.path.dirname(result_path), exist_ok=True)
-    with open(result_path, 'a') as f:
-        for name, acc in results.items():
-            f.write(f'{name} {acc}\n')
-    print(f"\nResults appended to {result_path}")
+    import json
+    existing = {}
+    if os.path.exists(result_path):
+        with open(result_path) as f:
+            existing = json.load(f)
+    existing.update({name: round(acc * 100, 4) for name, acc in results.items()})
+    with open(result_path, 'w') as f:
+        json.dump(existing, f, indent=2)
+    print(f"\nResults saved to {result_path}")
 
 
 if __name__ == '__main__':

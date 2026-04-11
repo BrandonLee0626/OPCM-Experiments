@@ -1,6 +1,6 @@
 import os
 import torch
-import copy, math, argparse, threading
+import copy, argparse, threading
 from datetime import datetime
 from queue import Queue
 
@@ -91,16 +91,11 @@ class OPCM:
         self.projected_task_vector_sum = task_vector
         self.first_tv = task_vector
 
-        self.rank_count = {
-            linear_weight_name: 0
-            for linear_weight_name in task_vector.linear_weight_list
-        }
-
     def get_split_rank(self, S):
         return (S.cumsum(dim=0) / S.sum() > self.alpha).float().argmax().item()
 
     def project_linear_weight(self, svd_result, linear_weight, split_rank):
-        U, S, V = svd_result
+        U, _, V = svd_result
 
         coeff_mat = U.T @ linear_weight @ V
         coeff_mat.fill_diagonal_(0)
@@ -125,16 +120,23 @@ class OPCM:
         total_fip_w_first = 0.0
         total_error = 0.0
         total_rank = 0
+        layer_info = {}
 
         for linear_weight_name in tv.linear_weight_list:
             svd_result = svd_result_dict[linear_weight_name]
+            weight = tv.backbone[linear_weight_name]
+            min_dim = min(weight.shape)
 
             split_rank = self.get_split_rank(svd_result[1])
-            self.rank_count[linear_weight_name] += split_rank
             total_rank += split_rank
 
+            layer_info[linear_weight_name] = {
+                'split_rank': split_rank,
+                'min_dim':    min_dim,
+            }
+
             projected_linear_weight = self.project_linear_weight(
-                svd_result, tv.backbone[linear_weight_name], split_rank
+                svd_result, weight, split_rank
             )
             projected_task_vector.backbone[linear_weight_name] = projected_linear_weight
 
@@ -145,7 +147,7 @@ class OPCM:
                 self.first_tv.backbone[linear_weight_name], projected_linear_weight
             )
             total_error += torch.linalg.norm(
-                projected_linear_weight - tv.backbone[linear_weight_name], ord='fro'
+                projected_linear_weight - weight, ord='fro'
             )
 
         n = len(tv.linear_weight_list)
@@ -154,6 +156,7 @@ class OPCM:
             'inner_product_with_first': total_fip_w_first / n,
             'approx_error': total_error / n,
             'rank': total_rank / n,
+            'layer_info': layer_info,
         }
 
         return projected_task_vector, metrics
@@ -208,7 +211,7 @@ def _run_once(args, tasks, task_vectors, model, gpu_replicas, csv_logger, use_ml
 
     raw_accs = _evaluate(tasks[:1])
     accs = {key.split('_', 2)[2]: val for key, val in raw_accs.items()}
-    print(f'  {tasks[0]}: {accs[tasks[0]]:.4f}')
+    print(f'  {tasks[0]}: {accs[tasks[0]]*100:.2f}%')
 
     if use_mlflow:
         import mlflow
@@ -228,6 +231,10 @@ def _run_once(args, tasks, task_vectors, model, gpu_replicas, csv_logger, use_ml
         print(f'  inner_product={metrics["inner_product"]:.4f}  '
               f'approx_error={metrics["approx_error"]:.4f}  '
               f'avg_rank={metrics["rank"]:.1f}')
+        print(f'  {"Layer":<50} {"split_rank":>10} {"min_dim":>8} {"remaining":>10}')
+        for layer_name, info in metrics['layer_info'].items():
+            remaining = info['min_dim'] - info['split_rank']
+            print(f'  {layer_name:<50} {info["split_rank"]:>10} {info["min_dim"]:>8} {remaining:>10}')
 
         merged_task_vector = opcm.get_merged_task_vector()
         merged_task_number = opcm.get_merged_task_number()
@@ -240,7 +247,7 @@ def _run_once(args, tasks, task_vectors, model, gpu_replicas, csv_logger, use_ml
         raw_accs = _evaluate(tasks[:merged_task_number])
         accs = {key.split('_', 2)[2]: val for key, val in raw_accs.items()}
         for t, acc in accs.items():
-            print(f'    {t}: {acc:.4f}')
+            print(f'    {t}: {acc*100:.2f}%')
 
         if use_mlflow:
             mlflow.log_metrics(raw_accs, step=merged_task_number)
@@ -248,8 +255,8 @@ def _run_once(args, tasks, task_vectors, model, gpu_replicas, csv_logger, use_ml
             mlflow.log_metric('inner product with first', metrics['inner_product_with_first'], step=merged_task_number)
             mlflow.log_metric('approx error', metrics['approx_error'], step=merged_task_number)
             mlflow.log_metric('rank', metrics['rank'], step=merged_task_number)
-            for layer_name, cumulative_rank in opcm.rank_count.items():
-                mlflow.log_metric(f'added_split_rank_{layer_name}', cumulative_rank, step=merged_task_number)
+            for layer_name, info in metrics['layer_info'].items():
+                mlflow.log_metric(f'split_rank_{layer_name}', info['split_rank'], step=merged_task_number)
 
         if csv_logger:
             csv_logger.log_accuracies(
@@ -265,7 +272,7 @@ def _run_once(args, tasks, task_vectors, model, gpu_replicas, csv_logger, use_ml
             csv_logger.log_layer_ranks(
                 step=merged_task_number,
                 added_task=added_task,
-                rank_count_dict=opcm.rank_count,
+                split_ranks={name: info['split_rank'] for name, info in metrics['layer_info'].items()},
             )
 
         final_accs = accs
@@ -273,7 +280,7 @@ def _run_once(args, tasks, task_vectors, model, gpu_replicas, csv_logger, use_ml
     return final_accs
 
 
-def _save_average_results(all_run_accs, all_tasks_set, parent_save_dir):
+def _save_average_results(all_run_accs, parent_save_dir):
     """Compute mean/std of final accuracies across runs and save to average/ subdir."""
     import csv as _csv
     import json as _json
@@ -289,19 +296,19 @@ def _save_average_results(all_run_accs, all_tasks_set, parent_save_dir):
 
     tasks_sorted = sorted(task_values.keys())
 
-    # Compute mean and std
+    # Compute mean and std (in % scale)
     summary = {}
     for task in tasks_sorted:
-        vals = task_values[task]
+        vals = [v * 100 for v in task_values[task]]
         mean = sum(vals) / len(vals)
         std = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
-        summary[task] = {'mean': round(mean, 6), 'std': round(std, 6), 'runs': vals}
+        summary[task] = {'mean': round(mean, 4), 'std': round(std, 4), 'runs': vals}
 
     overall_means = [summary[t]['mean'] for t in tasks_sorted]
     overall_mean = sum(overall_means) / len(overall_means)
 
     summary['_overall'] = {
-        'mean': round(overall_mean, 6),
+        'mean': round(overall_mean, 4),
         'num_runs': len(all_run_accs),
     }
 
@@ -314,7 +321,7 @@ def _save_average_results(all_run_accs, all_tasks_set, parent_save_dir):
     for i, run_accs in enumerate(all_run_accs):
         row_vals = [run_accs.get(t, '') for t in tasks_sorted]
         row_avg = sum(v for v in row_vals if isinstance(v, float)) / sum(1 for v in row_vals if isinstance(v, float))
-        rows.append([f'run_{i}'] + [round(v, 6) if isinstance(v, float) else v for v in row_vals] + [round(row_avg, 6)])
+        rows.append([f'run_{i}'] + [round(v * 100, 4) if isinstance(v, float) else v for v in row_vals] + [round(row_avg * 100, 4)])
 
     mean_row = ['mean'] + [summary[t]['mean'] for t in tasks_sorted] + [round(overall_mean, 6)]
     std_row = ['std'] + [summary[t]['std'] for t in tasks_sorted] + ['']
@@ -326,9 +333,9 @@ def _save_average_results(all_run_accs, all_tasks_set, parent_save_dir):
         w.writerows(rows)
 
     print(f'\nAverage results saved to: {avg_dir}')
-    print(f'Overall mean accuracy ({len(all_run_accs)} runs): {overall_mean:.4f}')
+    print(f'Overall mean accuracy ({len(all_run_accs)} runs): {overall_mean:.2f}%')
     for task in tasks_sorted:
-        print(f'  {task}: {summary[task]["mean"]:.4f} ± {summary[task]["std"]:.4f}')
+        print(f'  {task}: {summary[task]["mean"]:.2f}% ± {summary[task]["std"]:.2f}%')
 
 
 def main(args):
@@ -343,9 +350,6 @@ def main(args):
 
     use_mlflow = monitor in ('mlflow', 'both')
     use_csv = monitor in ('csv', 'both')
-
-    if use_mlflow:
-        import mlflow
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     n_gpus = torch.cuda.device_count()
@@ -403,12 +407,10 @@ def main(args):
         gpu_replicas = _make_gpu_replicas(model, n_gpus)
 
     # --- CSV logger setup ---
-    if model_type == 'clip':
-        result_txt = os.path.join('results', 'single_task_accuracy', 'clip', mode,
-                                  f'result_clip_{head_type}_{arch_str}.txt')
-    else:
-        result_txt = os.path.join('results', 'single_task_accuracy', 'vit', mode,
-                                  f'result_vit_{arch_str}.txt')
+    result_txt = os.path.join(
+        'results', 'single_task_accuracy', model_type, mode,
+        f'result_{model_type}_{head_type}_{arch_str}.json',
+    )
 
     single_task_accs = None
     if use_csv:
@@ -417,11 +419,14 @@ def main(args):
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     shuffle_suffix = '_shuffled' if args.shuffle else ''
-    mode_suffix = f'_{mode}' if head_type == 'linear' else ''
     runs_suffix = f'_runs{num_runs}' if num_runs > 1 else ''
-    parent_save_dir = (
-        f'results/{timestamp}_{model_type}_{head_type}_{arch_str}'
-        f'_tasks{args.num_tasks}_alpha{alpha}{mode_suffix}{shuffle_suffix}{runs_suffix}'
+    run_name = f'{timestamp}{shuffle_suffix}{runs_suffix}'
+    mode_dir = mode if head_type == 'linear' else 'ft'
+    parent_save_dir = os.path.join(
+        'results', 'opcm',
+        model_type, arch_str, head_type, mode_dir,
+        f'alpha{alpha}',
+        run_name,
     )
 
     all_run_accs = []
@@ -460,7 +465,7 @@ def main(args):
         all_run_accs.append(final_accs)
 
     if num_runs > 1 and use_csv:
-        _save_average_results(all_run_accs, set(base_task_list), parent_save_dir)
+        _save_average_results(all_run_accs, parent_save_dir)
 
 
 if __name__ == '__main__':
