@@ -343,12 +343,12 @@ if __name__ == '__main__':
     parser.add_argument('--clip_arch', choices=['ViT-B-32', 'ViT-B-16', 'ViT-L-14'], default='ViT-B-32')
     parser.add_argument('--tasks', nargs='+', default=None,
                         help='Specific tasks to train (default: all)')
-    parser.add_argument('--head_type', choices=['zeroshot', 'linear'], default='zeroshot',
+    parser.add_argument('--head_type', choices=['zeroshot', 'linear'], default='linear',
                         help='Classification head type: zeroshot (text embeddings) or linear '
-                             '(default: zeroshot)')
-    parser.add_argument('--mode', choices=['ft', 'lp', 'lp-ft'], default='ft',
+                             '(default: linear)')
+    parser.add_argument('--mode', choices=['ft', 'lp', 'lp-ft'], default='lp-ft',
                         help='Training mode: ft (full fine-tuning), lp (linear probe), '
-                             'lp-ft (not implemented). Ignored when head_type=zeroshot.')
+                             'lp-ft (LP then FT). Ignored when head_type=zeroshot. (default: lp-ft)')
     args = parser.parse_args()
 
     run_single_task_experiments(clip_arch=args.clip_arch, tasks=args.tasks,

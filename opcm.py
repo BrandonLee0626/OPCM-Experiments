@@ -185,118 +185,44 @@ class OPCM:
         return self.merged_task_number
 
 
-def main(args):
+def _run_once(args, tasks, task_vectors, model, gpu_replicas, csv_logger, use_mlflow, model_type, run_label=''):
+    """Run one OPCM merge pass. Returns final accuracies dict {task_name: acc}."""
     alpha = args.alpha
-    monitor = args.monitor
-    model_type = args.model
-    clip_arch = args.clip_arch
-    vit_arch = args.vit_arch
-    head_type = args.head_type if model_type == 'clip' else 'linear'
-
-    use_mlflow = monitor in ('mlflow', 'both')
-    use_csv = monitor in ('csv', 'both')
-
-    if use_mlflow:
-        import mlflow
-
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    n_gpus = torch.cuda.device_count()
-
-    if n_gpus == 0:
-        print('Device: CPU')
-    elif n_gpus == 1:
-        print(f'Device: {torch.cuda.get_device_name(0)} (1 GPU)')
-    else:
-        gpu_names = [torch.cuda.get_device_name(i) for i in range(n_gpus)]
-        print(f'Device: {n_gpus} GPUs available')
-        for i, name in enumerate(gpu_names):
-            print(f'  cuda:{i}  {name}')
-
-    arch_str = clip_arch if model_type == 'clip' else vit_arch
-    print(f'Model: {model_type} ({arch_str}), head_type: {head_type}')
-
-    if model_type == 'clip':
-        if head_type == 'linear':
-            model = MultiTaskCLIPLinear(clip_arch=clip_arch)
-        else:
-            model = MultiTaskCLIP(clip_arch=clip_arch)
-    else:
-        model = MultiTaskViT(vit_arch=vit_arch)
-    model.to(device)
-
-    if args.num_tasks == '8':
-        task_list = TASKS_8
-    elif args.num_tasks == '14':
-        task_list = TASKS_14
-    else:
-        task_list = None  # all tasks from num_classes_per_task.json
-
-    if args.shuffle:
-        import random
-        if task_list is None:
-            import json as _json
-            with open(os.path.join('dataset', 'num_classes_per_task.json')) as _f:
-                task_list = list(_json.load(_f).keys())
-        random.shuffle(task_list)
-        print(f'Task order (shuffled): {task_list}')
-
-    task_vectors = load_task_vectors(device, model_type=model_type, clip_arch=clip_arch, vit_arch=vit_arch,
-                                     head_type=head_type, task_list=task_list)
-    tasks = [tv.trained_task_names[0] for tv in task_vectors]
-
-    # --- Multi-GPU replicas ---
-    gpu_replicas = None
-    if n_gpus > 1:
-        print(f'Parallel evaluation enabled across {n_gpus} GPUs.')
-        gpu_replicas = _make_gpu_replicas(model, n_gpus)
 
     def _evaluate(tasks_to_eval):
         if gpu_replicas is not None:
             return evaluate_parallel(gpu_replicas, tasks_to_eval, model_type=model_type)
         return evaluate_model(model, tasks_to_eval, model_type=model_type)
 
-    # --- CSV logger setup ---
-    if model_type == 'clip':
-        result_txt = os.path.join('results', 'single_task_accuracy', 'clip',
-                                  f'result_clip_{head_type}_{arch_str}.txt')
-    else:
-        result_txt = os.path.join('results', 'single_task_accuracy', 'vit',
-                                  f'result_vit_{arch_str}.txt')
-    csv_logger = None
-    if use_csv:
-        from src.csv_logger import CSVLogger, load_single_task_accs
-        single_task_accs = load_single_task_accs(result_txt)
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        shuffle_suffix = '_shuffled' if args.shuffle else ''
-        save_dir = f'results/{timestamp}_{model_type}_{head_type}_{arch_str}_tasks{args.num_tasks}_alpha{alpha}{shuffle_suffix}'
-        csv_logger = CSVLogger(save_dir, tasks, single_task_accs, args)
-        print(f'CSV results will be saved to: {save_dir}')
-
     n_tasks = len(tasks)
     opcm = OPCM(alpha, task_vectors[0])
 
+    prefix = f'[Run {run_label}] ' if run_label else ''
+
     # --- Step 1: first task (no merge needed) ---
-    print(f'[1/{n_tasks}] Evaluating initial task: {tasks[0]}')
+    print(f'{prefix}[1/{n_tasks}] Evaluating initial task: {tasks[0]}')
     merged_task_vector = opcm.get_merged_task_vector()
     model.load_task_vector(merged_task_vector)
     if gpu_replicas is not None:
         _sync_replicas(model, gpu_replicas)
 
     raw_accs = _evaluate(tasks[:1])
-    # raw_accs keys are like "task_0_SUN397"; map to plain task names
     accs = {key.split('_', 2)[2]: val for key, val in raw_accs.items()}
     print(f'  {tasks[0]}: {accs[tasks[0]]:.4f}')
 
     if use_mlflow:
+        import mlflow
         mlflow.log_metrics(raw_accs, step=1)
     if csv_logger:
         csv_logger.log_accuracies(step=1, merged_tasks=tasks[:1], accuracies=accs)
+
+    final_accs = accs
 
     # --- Steps 2..N: merge remaining tasks ---
     for tv in task_vectors[1:]:
         added_task = tv.trained_task_names[0]
 
-        print(f'\n[{tasks.index(added_task) + 1}/{n_tasks}] Merging: {added_task}')
+        print(f'\n{prefix}[{tasks.index(added_task) + 1}/{n_tasks}] Merging: {added_task}')
         print(f'  Projecting task vector...')
         metrics = opcm.merge_task_vector(tv)
         print(f'  inner_product={metrics["inner_product"]:.4f}  '
@@ -342,6 +268,200 @@ def main(args):
                 rank_count_dict=opcm.rank_count,
             )
 
+        final_accs = accs
+
+    return final_accs
+
+
+def _save_average_results(all_run_accs, all_tasks_set, parent_save_dir):
+    """Compute mean/std of final accuracies across runs and save to average/ subdir."""
+    import csv as _csv
+    import json as _json
+
+    avg_dir = os.path.join(parent_save_dir, 'average')
+    os.makedirs(avg_dir, exist_ok=True)
+
+    # Collect per-task values across runs
+    task_values = {}
+    for run_accs in all_run_accs:
+        for task, acc in run_accs.items():
+            task_values.setdefault(task, []).append(acc)
+
+    tasks_sorted = sorted(task_values.keys())
+
+    # Compute mean and std
+    summary = {}
+    for task in tasks_sorted:
+        vals = task_values[task]
+        mean = sum(vals) / len(vals)
+        std = (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
+        summary[task] = {'mean': round(mean, 6), 'std': round(std, 6), 'runs': vals}
+
+    overall_means = [summary[t]['mean'] for t in tasks_sorted]
+    overall_mean = sum(overall_means) / len(overall_means)
+
+    summary['_overall'] = {
+        'mean': round(overall_mean, 6),
+        'num_runs': len(all_run_accs),
+    }
+
+    with open(os.path.join(avg_dir, 'summary.json'), 'w') as f:
+        _json.dump(summary, f, indent=2)
+
+    # Save average_accuracy.csv: one row per run + mean/std rows
+    headers = ['run'] + tasks_sorted + ['avg_all_tasks']
+    rows = []
+    for i, run_accs in enumerate(all_run_accs):
+        row_vals = [run_accs.get(t, '') for t in tasks_sorted]
+        row_avg = sum(v for v in row_vals if isinstance(v, float)) / sum(1 for v in row_vals if isinstance(v, float))
+        rows.append([f'run_{i}'] + [round(v, 6) if isinstance(v, float) else v for v in row_vals] + [round(row_avg, 6)])
+
+    mean_row = ['mean'] + [summary[t]['mean'] for t in tasks_sorted] + [round(overall_mean, 6)]
+    std_row = ['std'] + [summary[t]['std'] for t in tasks_sorted] + ['']
+    rows += [mean_row, std_row]
+
+    with open(os.path.join(avg_dir, 'average_accuracy.csv'), 'w', newline='') as f:
+        w = _csv.writer(f)
+        w.writerow(headers)
+        w.writerows(rows)
+
+    print(f'\nAverage results saved to: {avg_dir}')
+    print(f'Overall mean accuracy ({len(all_run_accs)} runs): {overall_mean:.4f}')
+    for task in tasks_sorted:
+        print(f'  {task}: {summary[task]["mean"]:.4f} ± {summary[task]["std"]:.4f}')
+
+
+def main(args):
+    alpha = args.alpha
+    monitor = args.monitor
+    model_type = args.model
+    clip_arch = args.clip_arch
+    vit_arch = args.vit_arch
+    head_type = args.head_type if model_type == 'clip' else 'linear'
+    mode      = args.mode
+    num_runs  = args.num_runs
+
+    use_mlflow = monitor in ('mlflow', 'both')
+    use_csv = monitor in ('csv', 'both')
+
+    if use_mlflow:
+        import mlflow
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    n_gpus = torch.cuda.device_count()
+
+    if n_gpus == 0:
+        print('Device: CPU')
+    elif n_gpus == 1:
+        print(f'Device: {torch.cuda.get_device_name(0)} (1 GPU)')
+    else:
+        gpu_names = [torch.cuda.get_device_name(i) for i in range(n_gpus)]
+        print(f'Device: {n_gpus} GPUs available')
+        for i, name in enumerate(gpu_names):
+            print(f'  cuda:{i}  {name}')
+
+    arch_str = clip_arch if model_type == 'clip' else vit_arch
+    print(f'Model: {model_type} ({arch_str}), head_type: {head_type}, mode: {mode}')
+
+    if model_type == 'clip':
+        if head_type == 'linear':
+            model = MultiTaskCLIPLinear(clip_arch=clip_arch)
+        else:
+            model = MultiTaskCLIP(clip_arch=clip_arch)
+    else:
+        model = MultiTaskViT(vit_arch=vit_arch)
+    model.to(device)
+
+    if args.num_tasks == '8':
+        base_task_list = TASKS_8
+    elif args.num_tasks == '14':
+        base_task_list = TASKS_14
+    else:
+        base_task_list = None  # all tasks from num_classes_per_task.json
+
+    # Resolve full task list for non-shuffle single run
+    if base_task_list is None:
+        import json as _json
+        with open(os.path.join('dataset', 'num_classes_per_task.json')) as _f:
+            base_task_list = list(_json.load(_f).keys())
+
+    if args.shuffle and num_runs == 1:
+        import random
+        random.shuffle(base_task_list)
+        print(f'Task order (shuffled): {base_task_list}')
+
+    if num_runs > 1 and not args.shuffle:
+        print(f'Note: num_runs={num_runs} with shuffle=False will repeat the same task order.')
+
+    task_vectors = load_task_vectors(device, model_type=model_type, clip_arch=clip_arch, vit_arch=vit_arch,
+                                     head_type=head_type, task_list=base_task_list, mode=mode)
+
+    # --- Multi-GPU replicas ---
+    gpu_replicas = None
+    if n_gpus > 1:
+        print(f'Parallel evaluation enabled across {n_gpus} GPUs.')
+        gpu_replicas = _make_gpu_replicas(model, n_gpus)
+
+    # --- CSV logger setup ---
+    if model_type == 'clip':
+        result_txt = os.path.join('results', 'single_task_accuracy', 'clip', mode,
+                                  f'result_clip_{head_type}_{arch_str}.txt')
+    else:
+        result_txt = os.path.join('results', 'single_task_accuracy', 'vit', mode,
+                                  f'result_vit_{arch_str}.txt')
+
+    single_task_accs = None
+    if use_csv:
+        from src.csv_logger import CSVLogger, load_single_task_accs
+        single_task_accs = load_single_task_accs(result_txt)
+
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    shuffle_suffix = '_shuffled' if args.shuffle else ''
+    mode_suffix = f'_{mode}' if head_type == 'linear' else ''
+    runs_suffix = f'_runs{num_runs}' if num_runs > 1 else ''
+    parent_save_dir = (
+        f'results/{timestamp}_{model_type}_{head_type}_{arch_str}'
+        f'_tasks{args.num_tasks}_alpha{alpha}{mode_suffix}{shuffle_suffix}{runs_suffix}'
+    )
+
+    all_run_accs = []
+
+    for run_idx in range(num_runs):
+        import random as _random
+
+        # Shuffle task order per run when num_runs > 1
+        if num_runs > 1 and args.shuffle:
+            shuffled_tvs = task_vectors.copy()
+            _random.shuffle(shuffled_tvs)
+        else:
+            shuffled_tvs = task_vectors
+
+        run_tasks = [tv.trained_task_names[0] for tv in shuffled_tvs]
+
+        if num_runs > 1:
+            run_save_dir = os.path.join(parent_save_dir, f'run_{run_idx}')
+            run_label = f'{run_idx + 1}/{num_runs}'
+            print(f'\n{"=" * 60}')
+            print(f'Run {run_idx + 1}/{num_runs}  |  Task order: {run_tasks}')
+            print('=' * 60)
+        else:
+            run_save_dir = parent_save_dir
+            run_label = ''
+
+        csv_logger = None
+        if use_csv:
+            csv_logger = CSVLogger(run_save_dir, run_tasks, single_task_accs, args)
+            print(f'CSV results will be saved to: {run_save_dir}')
+
+        final_accs = _run_once(
+            args, run_tasks, shuffled_tvs, model, gpu_replicas,
+            csv_logger, use_mlflow, model_type, run_label=run_label,
+        )
+        all_run_accs.append(final_accs)
+
+    if num_runs > 1 and use_csv:
+        _save_average_results(all_run_accs, set(base_task_list), parent_save_dir)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -350,10 +470,10 @@ if __name__ == '__main__':
     parser.add_argument(
         '--num_tasks',
         choices=['8', '14', 'all'],
-        default='all',
+        default='8',
         help='Number of tasks to use: 8 (SUN397/Cars/RESISC45/EuroSAT/SVHN/GTSRB/MNIST/DTD), '
              '14 (8 + Flowers102/PCAM/OxfordIIITPet/STL10/CIFAR100/FashionMNIST), '
-             'all (default)',
+             'all (all tasks with checkpoints available, as listed in dataset/num_classes_per_task.json) ',
     )
     parser.add_argument(
         '--shuffle',
@@ -388,10 +508,23 @@ if __name__ == '__main__':
     parser.add_argument(
         '--head_type',
         choices=['zeroshot', 'linear'],
-        default='zeroshot',
+        default='linear',
         help='Inference head type for CLIP (ignored for vit): '
              'zeroshot uses text embeddings, linear uses a trained classification head '
-             '(default: zeroshot)',
+             '(default: linear)',
+    )
+    parser.add_argument(
+        '--mode',
+        choices=['ft', 'lp-ft'],
+        default='lp-ft',
+        help='Checkpoint mode to load task vectors from: ft or lp-ft (default: lp-ft)',
+    )
+    parser.add_argument(
+        '--num_runs',
+        type=int,
+        default=1,
+        help='Number of times to repeat the experiment (default: 1). '
+             'Use with --shuffle to average over different task orders.',
     )
 
     args = parser.parse_args()

@@ -34,6 +34,8 @@ class CSVLogger:
             'task_order': tasks,
             'single_task_accs': single_task_accs,
         }
+        if head_type == 'linear':
+            config['mode'] = args.mode
         with open(os.path.join(save_dir, 'config.json'), 'w') as f:
             json.dump(config, f, indent=2)
 

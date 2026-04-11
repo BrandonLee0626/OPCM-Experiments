@@ -100,7 +100,13 @@ Checkpoints are saved to `models/{vit,clip_zeroshot,clip_linear}/{arch}/{mode}/`
 ```bash
 python scripts/evaluate_model.py --model clip --clip_arch ViT-B-32 --head_type zeroshot
 python scripts/evaluate_model.py --model vit  --vit_arch vit_base_patch16_224
+
+# Evaluate lp-ft checkpoints
+python scripts/evaluate_model.py --model vit --vit_arch vit_base_patch16_224 --mode lp-ft
+python scripts/evaluate_model.py --model clip --clip_arch ViT-B-32 --head_type linear --mode lp-ft
 ```
+
+`--mode` selects which checkpoint folder to load (`ft` / `lp` / `lp-ft`, default: `ft`). Ignored when `--head_type zeroshot`.
 
 Results are appended to `results/single_task_accuracy/{model_type}/{mode}/result_*.txt`.
 
@@ -110,11 +116,17 @@ Results are appended to `results/single_task_accuracy/{model_type}/{mode}/result
 # CLIP with zero-shot head (default)
 python opcm.py --model clip --clip_arch ViT-B-32 --head_type zeroshot --alpha 0.5
 
-# CLIP with linear head
+# CLIP with linear head (ft checkpoints)
 python opcm.py --model clip --clip_arch ViT-B-32 --head_type linear --alpha 0.5
 
-# ViT
+# CLIP with linear head (lp-ft checkpoints)
+python opcm.py --model clip --clip_arch ViT-B-32 --head_type linear --mode lp-ft --alpha 0.5
+
+# ViT (ft checkpoints)
 python opcm.py --model vit --vit_arch vit_base_patch16_224 --alpha 0.5
+
+# ViT (lp-ft checkpoints)
+python opcm.py --model vit --vit_arch vit_base_patch16_224 --mode lp-ft --alpha 0.5
 
 # Use only 8-task subset
 python opcm.py --model clip --clip_arch ViT-B-32 --num_tasks 8
@@ -132,6 +144,7 @@ python opcm.py --model clip --clip_arch ViT-B-32 --num_tasks 14 --shuffle
 | `--clip_arch` | `ViT-B-32` | CLIP architecture (used when `--model clip`) |
 | `--vit_arch` | `vit_base_patch16_224` | ViT architecture (used when `--model vit`) |
 | `--head_type` | `zeroshot` | CLIP head type: `zeroshot` or `linear` |
+| `--mode` | `ft` | Checkpoint mode to load task vectors from: `ft` or `lp-ft` (ignored when `--head_type zeroshot`) |
 | `--num_tasks` | `all` | Task subset: `8`, `14`, or `all` |
 | `--shuffle` | `False` | Randomly shuffle task merge order |
 | `--monitor` | `csv` | Logging backend: `csv`, `mlflow`, or `both` |
@@ -147,7 +160,7 @@ CSV results are saved to `results/{timestamp}_{model}_{head}_{arch}_tasks{num_ta
 | `forgetting.csv` | Forgetting since each task's first merge |
 | `projection_metrics.csv` | Frobenius inner product, approximation error, average split rank |
 | `layer_ranks.csv` | Cumulative split rank per linear layer |
-| `config.json` | Run configuration: model, arch, alpha, num_tasks, shuffle, task_order, single-task accuracy baselines |
+| `config.json` | Run configuration: model, arch, alpha, num_tasks, shuffle, task_order, single-task accuracy baselines. `mode` is included when `head_type` is `linear` |
 
 MLflow logging is also supported (`--monitor mlflow` or `--monitor both`).
 

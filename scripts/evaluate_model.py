@@ -32,7 +32,7 @@ def evaluate_model(model, test_loader, device):
 
 
 def evaluate_saved_models(model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_base_patch16_224',
-                          head_type='zeroshot'):
+                          head_type='zeroshot', mode='ft'):
     n_gpus = torch.cuda.device_count()
     if n_gpus == 0:
         devices = [torch.device('cpu')]
@@ -48,7 +48,10 @@ def evaluate_saved_models(model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_
 
     if model_type == 'clip':
         arch = clip_arch
-        models_dir = os.path.join('models', f'clip_{head_type}', arch)
+        if head_type == 'zeroshot' and mode != 'ft':
+            print(f'[Warning] --mode={mode} is not applicable to head_type=zeroshot; using ft.')
+            mode = 'ft'
+        models_dir = os.path.join('models', f'clip_{head_type}', arch, mode)
         prefix = f'clip_{arch}_'
         result_path = f'result_clip_{head_type}_{arch}.txt'
         def make_model(task_name, device):
@@ -57,17 +60,17 @@ def evaluate_saved_models(model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_
             return SingleTaskCLIP(task_name=task_name, clip_arch=arch).to(device)
     else:
         arch = vit_arch
-        models_dir = os.path.join('models', 'vit', arch)
+        models_dir = os.path.join('models', 'vit', arch, mode)
         prefix = f'{arch}_'
         result_path = f'result_vit_{arch}.txt'
         def make_model(task_name, device):
             return SingleTaskViT(task_name=task_name, vit_arch=arch).to(device)
 
-    result_path = os.path.join('results', 'single_task_accuracy', model_type, result_path)
+    result_path = os.path.join('results', 'single_task_accuracy', model_type, mode, result_path)
     os.makedirs(os.path.dirname(result_path), exist_ok=True)
 
     head_tag = head_type if model_type == 'clip' else 'linear'
-    print(f'Model: {model_type} ({arch}), head_type: {head_tag}')
+    print(f'Model: {model_type} ({arch}), head_type: {head_tag}, mode: {mode}')
     print(f'Models dir: {models_dir}\n{"="*50}')
 
     tasks = [
@@ -117,7 +120,7 @@ def evaluate_saved_models(model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_
         t.join()
 
     print(f'\n{"="*50}')
-    with open(result_path, 'a') as f:
+    with open(result_path, 'w') as f:
         for task_name, _ in tasks:
             if task_name in results:
                 f.write(f'{task_name} {results[task_name]}\n')
@@ -126,15 +129,19 @@ def evaluate_saved_models(model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', choices=['vit', 'clip'], default='vit')
+    parser.add_argument('--model', choices=['vit', 'clip'], default='clip')
     parser.add_argument('--clip_arch', choices=['ViT-B-32', 'ViT-B-16', 'ViT-L-14'], default='ViT-B-32')
     parser.add_argument('--vit_arch',
                         choices=['vit_base_patch32_224', 'vit_base_patch16_224', 'vit_large_patch16_224'],
                         default='vit_base_patch16_224')
-    parser.add_argument('--head_type', choices=['zeroshot', 'linear'], default='zeroshot',
+    parser.add_argument('--head_type', choices=['zeroshot', 'linear'], default='linear',
                         help='Inference head type for CLIP (ignored for vit): '
                              'zeroshot uses text embeddings, linear uses a trained classification head '
-                             '(default: zeroshot)')
+                             '(default: linear)')
+    parser.add_argument('--mode', choices=['ft', 'lp', 'lp-ft'], default='lp-ft',
+                        help='Training mode of the checkpoints to evaluate: '
+                             'ft (full fine-tuning), lp (linear probe), lp-ft (LP then FT) '
+                             '(default: lp-ft)')
     args = parser.parse_args()
 
     evaluate_saved_models(
@@ -142,4 +149,5 @@ if __name__ == '__main__':
         clip_arch=args.clip_arch,
         vit_arch=args.vit_arch,
         head_type=args.head_type,
+        mode=args.mode,
     )

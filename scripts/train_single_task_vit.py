@@ -369,8 +369,8 @@ if __name__ == '__main__':
                         default='vit_base_patch16_224')
     parser.add_argument('--tasks', nargs='+', default=None,
                         help='Specific tasks to train (default: below-95%% targets)')
-    parser.add_argument('--mode', choices=['ft', 'lp', 'lp-ft'], default='ft',
+    parser.add_argument('--mode', choices=['ft', 'lp', 'lp-ft'], default='lp-ft',
                         help='Training mode: ft (full fine-tuning), lp (linear probe), '
-                             'lp-ft (not implemented)')
+                             'lp-ft (LP then FT) (default: lp-ft)')
     args = parser.parse_args()
     run_single_task_experiments(vit_arch=args.vit_arch, tasks=args.tasks, mode=args.mode)

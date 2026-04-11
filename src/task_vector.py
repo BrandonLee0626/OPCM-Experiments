@@ -13,9 +13,8 @@ class TaskVector():
         for parameter_name in pretrained:
             self.backbone[parameter_name] = finetuned[parameter_name] - pretrained[parameter_name].to(finetuned[parameter_name].device)
 
-            if any(k in parameter_name for k in ['weight', 'proj']) and self.backbone[parameter_name].dim() in [2, 4]:
-                if 'embed' not in parameter_name and 'position' not in parameter_name:
-                    self.linear_weight_list.append(parameter_name)
+            if any(k in parameter_name for k in ['weight', 'proj']) and self.backbone[parameter_name].dim() == 2:
+                self.linear_weight_list.append(parameter_name)
 
         for task_name in task_names:
             self.head_weights[task_name] = finetuned_heads
