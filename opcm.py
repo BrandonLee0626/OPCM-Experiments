@@ -40,11 +40,21 @@ def _sync_replicas(source_model, replicas):
             name: {k: v.cpu() for k, v in head.state_dict().items()}
             for name, head in source_model.heads.items()
         }
-    for replica, dev in replicas:
+
+    def _copy_to(replica, dev):
         replica.backbone.load_state_dict({k: v.to(dev) for k, v in backbone_cpu.items()})
         if heads_cpu is not None:
             for name, state in heads_cpu.items():
                 replica.heads[name].load_state_dict({k: v.to(dev) for k, v in state.items()})
+
+    threads = [
+        threading.Thread(target=_copy_to, args=(replica, dev), daemon=True)
+        for replica, dev in replicas
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
 def evaluate_parallel(replicas, tasks, model_type='vit'):
     """
@@ -345,7 +355,7 @@ def main(args):
     clip_arch = args.clip_arch
     vit_arch = args.vit_arch
     head_type = args.head_type if model_type == 'clip' else 'linear'
-    mode      = args.mode
+    mode      = 'ft' if head_type == 'zeroshot' else args.mode
     num_runs  = args.num_runs
 
     use_mlflow = monitor in ('mlflow', 'both')
@@ -409,7 +419,7 @@ def main(args):
     # --- CSV logger setup ---
     result_txt = os.path.join(
         'results', 'single_task_accuracy', model_type, mode,
-        f'result_{model_type}_{head_type}_{arch_str}.json',
+        f'result_{model_type}_{head_type}_{mode}_{arch_str}.json',
     )
 
     single_task_accs = None
@@ -421,10 +431,9 @@ def main(args):
     shuffle_suffix = '_shuffled' if args.shuffle else ''
     runs_suffix = f'_runs{num_runs}' if num_runs > 1 else ''
     run_name = f'{timestamp}{shuffle_suffix}{runs_suffix}'
-    mode_dir = mode if head_type == 'linear' else 'ft'
     parent_save_dir = os.path.join(
         'results', 'opcm',
-        model_type, arch_str, head_type, mode_dir,
+        model_type, arch_str, head_type, mode,
         f'alpha{alpha}',
         run_name,
     )

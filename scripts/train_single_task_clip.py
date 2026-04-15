@@ -328,7 +328,7 @@ def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zer
             print(f"  {name:<20} FAILED")
 
     result_path = os.path.join('results', 'single_task_accuracy', 'clip', mode,
-                               f'result_clip_{head_type}_{clip_arch}.json')
+                               f'result_clip_{head_type}_{mode}_{clip_arch}.json')
     os.makedirs(os.path.dirname(result_path), exist_ok=True)
     import json
     existing = {}

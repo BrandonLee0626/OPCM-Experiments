@@ -12,6 +12,7 @@ with open(_json_path) as f:
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def svd(w):
+    """Returns (U, S, V). Note: returns V, not Vt."""
     driver = "gesvd" if w.is_cuda else None
     U, S, Vt = torch.linalg.svd(w, full_matrices=True, driver=driver)
     return U, S, Vt.T
@@ -71,8 +72,10 @@ def evaluate_task(model, task, eval_device, model_type='vit'):
 
     return correct / total if total > 0 else 0
 
-def evaluate_model(model, tasks, model_type='vit'):
+def evaluate_model(model, tasks, model_type='vit', eval_device=None):
+    if eval_device is None:
+        eval_device = next(model.parameters()).device
     results = {}
     for task_idx, task in enumerate(tasks):
-        results[f'task_{task_idx}_{task}'] = evaluate_task(model, task, device, model_type)
+        results[f'task_{task_idx}_{task}'] = evaluate_task(model, task, eval_device, model_type)
     return results

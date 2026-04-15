@@ -67,7 +67,7 @@ def evaluate_saved_models(model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_
 
     result_path = os.path.join(
         'results', 'single_task_accuracy', model_type, mode,
-        f'result_{model_type}_{head_type}_{arch}.json',
+        f'result_{model_type}_{head_type}_{mode}_{arch}.json',
     )
     os.makedirs(os.path.dirname(result_path), exist_ok=True)
 

@@ -353,7 +353,7 @@ def run_single_task_experiments(vit_arch='vit_base_patch16_224', tasks=None, mod
             print(f"  {name:<20} FAILED")
 
     result_path = os.path.join('results', 'single_task_accuracy', 'vit', mode,
-                               f'result_vit_linear_{vit_arch}.json')
+                               f'result_vit_linear_{mode}_{vit_arch}.json')
     os.makedirs(os.path.dirname(result_path), exist_ok=True)
     import json
     existing = {}
