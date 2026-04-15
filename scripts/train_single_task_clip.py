@@ -8,6 +8,8 @@ from queue import Queue
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src.parallel import get_devices, init_cuda_contexts
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -205,18 +207,7 @@ def train_and_evaluate(model, train_loader, test_loader, device,
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zeroshot', mode='ft'):
-    n_gpus = torch.cuda.device_count()
-    if n_gpus == 0:
-        print('Device: CPU')
-        devices = [torch.device('cpu')]
-    elif n_gpus == 1:
-        print(f'Device: {torch.cuda.get_device_name(0)} (1 GPU)')
-        devices = [torch.device('cuda:0')]
-    else:
-        print(f'Device: {n_gpus} GPUs available')
-        for i in range(n_gpus):
-            print(f'  cuda:{i}  {torch.cuda.get_device_name(i)}')
-        devices = [torch.device(f'cuda:{i}') for i in range(n_gpus)]
+    devices = get_devices()
 
     if head_type == 'zeroshot' and mode != 'ft':
         print(f'[Warning] --mode={mode} is not applicable to head_type=zeroshot; using ft.')
@@ -251,11 +242,7 @@ def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zer
     # Initialize CUDA contexts for all GPUs before launching threads.
     # Without this, threads racing to initialize CUDA while another thread is
     # inside AMP/GradScaler causes currentStreamCaptureStatusMayInitCtx errors.
-    for dev in devices:
-        if dev.type == 'cuda':
-            torch.zeros(1, device=dev)
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+    init_cuda_contexts(devices)
 
     gpu_queue = Queue()
     for dev in devices:

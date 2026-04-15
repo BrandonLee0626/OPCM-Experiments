@@ -9,6 +9,7 @@ import argparse
 from queue import Queue
 
 from src.model import SingleTaskViT, SingleTaskCLIP, SingleTaskCLIPLinear
+from src.parallel import get_devices, init_cuda_contexts
 from dataset.dataloader import get_test_dataloader
 
 _print_lock = threading.Lock()
@@ -33,18 +34,7 @@ def evaluate_model(model, test_loader, device):
 
 def evaluate_saved_models(model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_base_patch16_224',
                           head_type='zeroshot', mode='ft'):
-    n_gpus = torch.cuda.device_count()
-    if n_gpus == 0:
-        devices = [torch.device('cpu')]
-        print('Device: CPU')
-    elif n_gpus == 1:
-        devices = [torch.device('cuda:0')]
-        print(f'Device: {torch.cuda.get_device_name(0)} (1 GPU)')
-    else:
-        devices = [torch.device(f'cuda:{i}') for i in range(n_gpus)]
-        print(f'Device: {n_gpus} GPUs')
-        for i in range(n_gpus):
-            print(f'  cuda:{i}  {torch.cuda.get_device_name(i)}')
+    devices = get_devices()
 
     if model_type == 'clip':
         arch = clip_arch
@@ -87,11 +77,7 @@ def evaluate_saved_models(model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_
         gpu_queue.put(dev)
 
     # Pre-initialize CUDA contexts to avoid race conditions
-    for dev in devices:
-        if dev.type == 'cuda':
-            torch.zeros(1, device=dev)
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
+    init_cuda_contexts(devices)
 
     model_init_lock = threading.Lock()
     results = {}
