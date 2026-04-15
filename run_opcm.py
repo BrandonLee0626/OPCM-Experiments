@@ -8,7 +8,10 @@ import torch
 from src.model import MultiTaskViT, MultiTaskCLIP, MultiTaskCLIPLinear
 from src.utils import load_task_vectors, evaluate_model
 from src.parallel import get_devices, make_gpu_replicas, sync_replicas, evaluate_parallel
-from opcm import OPCM, TASKS_8, TASKS_14
+from opcm import OPCM
+
+TASKS_8 = ['SUN397', 'Cars', 'RESISC45', 'EuroSAT', 'SVHN', 'GTSRB', 'MNIST', 'DTD']
+TASKS_14 = TASKS_8 + ['Flowers102', 'PCAM', 'OxfordIIITPet', 'STL10', 'CIFAR100', 'FashionMNIST']
 
 
 def _run_once(args, tasks, task_vectors, model, gpu_replicas, csv_logger, use_mlflow, model_type, run_label=''):

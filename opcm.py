@@ -5,10 +5,6 @@ import torch
 from src.task_vector import TaskVector
 from src.utils import frobenius_inner_product
 
-TASKS_8 = ['SUN397', 'Cars', 'RESISC45', 'EuroSAT', 'SVHN', 'GTSRB', 'MNIST', 'DTD']
-TASKS_14 = TASKS_8 + ['Flowers102', 'PCAM', 'OxfordIIITPet', 'STL10', 'CIFAR100', 'FashionMNIST']
-
-
 # ---------------------------------------------------------------------------
 # OPCM
 # ---------------------------------------------------------------------------
