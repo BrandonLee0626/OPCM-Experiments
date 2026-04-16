@@ -4,6 +4,16 @@ This repository reproduces **OPCM (Orthogonal Projection-based Continual Merging
 
 Official repository: [tanganke/opcm](https://github.com/tanganke/opcm) | Project page: [tanganke.github.io/opcm](https://tanganke.github.io/opcm/)
 
+## Installation
+
+```bash
+# 1. Install PyTorch with your CUDA version (https://pytorch.org/get-started/locally/)
+pip install torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cu128
+
+# 2. Install remaining dependencies
+pip install -r requirements.txt
+```
+
 ## Overview
 
 OPCM is a model merging method that uses orthogonal projection to mitigate task interference when merging multiple fine-tuned models. At each step, an incoming task vector is projected onto the null space of the accumulated merged task vector, then rescaled to maintain consistent norm. This repo reimplements the core method and explores further experimental settings beyond those in the original paper.

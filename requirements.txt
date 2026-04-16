@@ -1,0 +1,21 @@
+# Deep learning
+# Install PyTorch with the appropriate CUDA version from https://pytorch.org/get-started/locally/
+# e.g. pip install torch==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cu128
+torch>=2.10.0
+torchvision>=0.25.0
+
+# Vision backbone
+timm>=1.0.25
+
+# CLIP backbone
+open-clip-torch>=3.3.0
+
+# Dataset loading (HuggingFace)
+datasets>=4.7.0
+
+# Utilities
+numpy>=2.4.0
+tqdm>=4.67.0
+
+# Optional: heatmap visualisation (analyze_cosine_sim.py)
+matplotlib>=3.10.0
