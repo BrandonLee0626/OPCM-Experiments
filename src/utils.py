@@ -41,9 +41,18 @@ def load_task_vector(task, device, model_type='vit', clip_arch='ViT-B-32', vit_a
 
 def load_task_vectors(device, model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_base_patch16_224',
                       head_type='zeroshot', task_list=None, mode='ft'):
+    """Load task vectors in parallel (file I/O bound; GPU ops serialized by CUDA)."""
+    from concurrent.futures import ThreadPoolExecutor
     tasks = task_list if task_list is not None else list(num_classes_per_task.keys())
-    return [load_task_vector(task, device, model_type, clip_arch, vit_arch, head_type, mode)
-            for task in tasks]
+    load_lock = threading.Lock()  # CUDA model init on shared device needs serialization
+
+    def _load(task):
+        with load_lock:
+            return load_task_vector(task, device, model_type, clip_arch, vit_arch, head_type, mode)
+
+    with ThreadPoolExecutor(max_workers=min(4, len(tasks))) as ex:
+        results = list(ex.map(_load, tasks))
+    return results
 
 # Cache key: (task_name, model_type)
 _test_dataloader_cache: dict = {}
@@ -54,17 +63,27 @@ def evaluate_task(model, task, eval_device, model_type='vit'):
     model.eval()
     correct = total = 0
 
+    # Double-checked locking: DataLoader is created outside the lock to avoid
+    # serializing threads. Concurrent cache misses may build duplicate loaders,
+    # but only one is stored — safe and correct.
     cache_key = (task, model_type)
     with _cache_lock:
-        if cache_key not in _test_dataloader_cache:
-            _test_dataloader_cache[cache_key] = get_test_dataloader(
-                task, batch_size=64, model_type=model_type
-            )
-        test_loader = _test_dataloader_cache[cache_key]
+        test_loader = _test_dataloader_cache.get(cache_key)
+
+    if test_loader is None:
+        test_loader = get_test_dataloader(task, batch_size=64, model_type=model_type)
+        with _cache_lock:
+            if cache_key not in _test_dataloader_cache:
+                _test_dataloader_cache[cache_key] = test_loader
+            else:
+                # Another thread finished first — use its loader for consistency
+                test_loader = _test_dataloader_cache[cache_key]
 
     with torch.no_grad():
         for inputs, labels in test_loader:
-            inputs, labels = inputs.to(eval_device), labels.to(eval_device)
+            # non_blocking=True: overlaps CPU→GPU transfer with computation when pin_memory=True
+            inputs = inputs.to(eval_device, non_blocking=True)
+            labels = labels.to(eval_device, non_blocking=True)
             outputs = model(inputs, task)
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)

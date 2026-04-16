@@ -57,10 +57,6 @@ def _run_once(args, tasks, task_vectors, model, gpu_replicas, csv_logger, use_ml
         print(f'  inner_product={metrics["inner_product"]:.4f}  '
               f'approx_error={metrics["approx_error"]:.4f}  '
               f'avg_rank={metrics["rank"]:.1f}')
-        print(f'  {"Layer":<50} {"split_rank":>10} {"min_dim":>8} {"remaining":>10}')
-        for layer_name, info in metrics['layer_info'].items():
-            remaining = info['min_dim'] - info['split_rank']
-            print(f'  {layer_name:<50} {info["split_rank"]:>10} {info["min_dim"]:>8} {remaining:>10}')
 
         merged_task_vector = opcm.get_merged_task_vector()
         merged_task_number = opcm.get_merged_task_number()

@@ -80,6 +80,8 @@ def evaluate_parallel(replicas, tasks, model_type='vit'):
     Each GPU processes one task at a time; tasks are dynamically assigned.
     Returns dict with same key format as evaluate_model.
     """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     gpu_queue = Queue()
     for replica, dev in replicas:
         gpu_queue.put((replica, dev))
@@ -96,13 +98,10 @@ def evaluate_parallel(replicas, tasks, model_type='vit'):
         finally:
             gpu_queue.put((replica, dev))
 
-    threads = [
-        threading.Thread(target=_worker, args=(i, task), daemon=True)
-        for i, task in enumerate(tasks)
-    ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    # Limit concurrent threads to the number of GPUs to avoid unnecessary contention
+    with ThreadPoolExecutor(max_workers=len(replicas)) as executor:
+        futures = [executor.submit(_worker, i, task) for i, task in enumerate(tasks)]
+        for f in as_completed(futures):
+            f.result()
 
     return results
