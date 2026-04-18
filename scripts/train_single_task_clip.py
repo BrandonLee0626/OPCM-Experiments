@@ -1,9 +1,11 @@
 import os
 import sys
+import json
 import copy
+import math
+import random
 import itertools
 import threading
-import numpy as np
 from queue import Queue
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -27,61 +29,27 @@ def tprint(*args, **kwargs):
     with _print_lock:
         print(*args, **kwargs)
 
-# ── Per-dataset hyperparameters ───────────────────────────────────────────────
-# CLIP fine-tuning generally benefits from lower LR than ViT (pretrained weights are stronger)
-DATASET_CONFIGS = {
-    "MNIST":         {"lr": 1e-5, "epochs": 5,   "bs": 128, "warmup": 1,  "patience": 3},
-    "FashionMNIST":  {"lr": 1e-5, "epochs": 5,   "bs": 128, "warmup": 1,  "patience": 3},
-    "EMNIST":        {"lr": 1e-5, "epochs": 10,  "bs": 128, "warmup": 1,  "patience": 5},
-    "CIFAR10":       {"lr": 5e-6, "epochs": 10,  "bs": 64,  "warmup": 1,  "patience": 5},
-    "STL10":         {"lr": 5e-6, "epochs": 10,  "bs": 64,  "warmup": 1,  "patience": 5},
-    "SVHN":          {"lr": 1e-5, "epochs": 10,  "bs": 64,  "warmup": 1,  "patience": 5},
-    "GTSRB":         {"lr": 1e-5, "epochs": 10,  "bs": 64,  "warmup": 1,  "patience": 5},
-    "EuroSAT":       {"lr": 5e-6, "epochs": 10,  "bs": 64,  "warmup": 1,  "patience": 5},
-    "RESISC45":      {"lr": 5e-6, "epochs": 10,  "bs": 64,  "warmup": 1,  "patience": 5},
-    "PCAM":          {"lr": 1e-5, "epochs": 10,  "bs": 128, "warmup": 1,  "patience": 5},
-    "RenderedSST2":  {"lr": 5e-6, "epochs": 15,  "bs": 64,  "warmup": 2,  "patience": 7},
-    "Flowers102":    {"lr": 2e-6, "epochs": 30,  "bs": 32,  "warmup": 3,  "patience": 10},
-    "OxfordIIITPet": {"lr": 2e-6, "epochs": 20,  "bs": 64,  "warmup": 2,  "patience": 7},
-    "Food101":       {"lr": 5e-6, "epochs": 15,  "bs": 64,  "warmup": 2,  "patience": 7},
-    "Cars":          {"lr": 2e-6, "epochs": 30,  "bs": 32,  "warmup": 3,  "patience": 10},
-    "CIFAR100":      {"lr": 5e-6, "epochs": 20,  "bs": 64,  "warmup": 2,  "patience": 7},
-    "DTD":           {"lr": 2e-6, "epochs": 30,  "bs": 32,  "warmup": 3,  "patience": 10},
-    "SUN397":        {"lr": 2e-6, "epochs": 20,  "bs": 64,  "warmup": 2,  "patience": 7},
+
+SUPPORTED_DATASETS = [
+    "MNIST", "FashionMNIST", "EMNIST", "CIFAR10", "STL10", "SVHN",
+    "GTSRB", "EuroSAT", "RESISC45", "PCAM", "RenderedSST2",
+    "Flowers102", "OxfordIIITPet", "Food101", "Cars", "CIFAR100", "DTD", "SUN397",
+]
+
+# lp: backbone frozen, high lr, large batch
+# ft/lp-ft: full fine-tuning with layer-wise lr decay
+_DEFAULTS = {
+    "lp": {"lr": 5e-3, "bs": 256, "warmup": 1, "patience": 10},
+    "ft": {"lr": 1e-5, "bs": 64,  "warmup": 2, "patience": 7},
 }
 
-# Linear probe: backbone frozen → only a linear head is trained.
-# No fixed epoch limit — runs until early stopping triggers (epochs=None).
-LP_DATASET_CONFIGS = {
-    "MNIST":         {"lr": 1e-2, "bs": 256, "warmup": 1,  "patience": 10},
-    "FashionMNIST":  {"lr": 1e-2, "bs": 256, "warmup": 1,  "patience": 10},
-    "EMNIST":        {"lr": 1e-2, "bs": 256, "warmup": 1,  "patience": 10},
-    "CIFAR10":       {"lr": 5e-3, "bs": 256, "warmup": 1,  "patience": 10},
-    "STL10":         {"lr": 5e-3, "bs": 256, "warmup": 1,  "patience": 10},
-    "SVHN":          {"lr": 1e-2, "bs": 256, "warmup": 1,  "patience": 10},
-    "GTSRB":         {"lr": 5e-3, "bs": 256, "warmup": 1,  "patience": 10},
-    "EuroSAT":       {"lr": 5e-3, "bs": 256, "warmup": 1,  "patience": 10},
-    "RESISC45":      {"lr": 5e-3, "bs": 256, "warmup": 1,  "patience": 10},
-    "PCAM":          {"lr": 5e-3, "bs": 256, "warmup": 1,  "patience": 10},
-    "RenderedSST2":  {"lr": 5e-3, "bs": 256, "warmup": 1,  "patience": 10},
-    "Flowers102":    {"lr": 5e-3, "bs": 128, "warmup": 1,  "patience": 15},
-    "OxfordIIITPet": {"lr": 5e-3, "bs": 128, "warmup": 1,  "patience": 15},
-    "Food101":       {"lr": 5e-3, "bs": 128, "warmup": 1,  "patience": 15},
-    "Cars":          {"lr": 5e-3, "bs": 128, "warmup": 1,  "patience": 15},
-    "CIFAR100":      {"lr": 5e-3, "bs": 128, "warmup": 1,  "patience": 15},
-    "DTD":           {"lr": 5e-3, "bs": 128, "warmup": 1,  "patience": 20},
-    "SUN397":        {"lr": 5e-3, "bs": 128, "warmup": 1,  "patience": 15},
-}
-
+def get_config(mode: str) -> dict:
+    base = _DEFAULTS["lp" if mode == "lp" else "ft"]
+    lr = base["lr"] * (10 ** random.uniform(-0.5, 0.5))
+    return {**base, "lr": lr}
 
 # ── Layer-wise LR decay for CLIP visual encoder ───────────────────────────────
 def get_param_groups(model, lr: float, weight_decay: float, lr_decay: float = 0.9):
-    """
-    CLIP visual encoder layer-wise LR decay:
-      linear head (if present)        → lr  (no decay)
-      transformer.resblocks[N-1..0]   → lr * decay^1 .. lr * decay^N
-      patch embedding / other         → lr * decay^(N+1)
-    """
     backbone = model.backbone
     blocks = list(backbone.transformer.resblocks)
     num_layers = len(blocks)
@@ -97,15 +65,12 @@ def get_param_groups(model, lr: float, weight_decay: float, lr_decay: float = 0.
         if nodecay_p:
             param_groups.append({"params": nodecay_p, "lr": group_lr, "weight_decay": 0.0})
 
-    # Linear head at the highest lr (only for SingleTaskCLIPLinear)
     if hasattr(model, 'head'):
         param_groups.append({"params": list(model.head.parameters()), "lr": lr, "weight_decay": weight_decay})
 
-    # Transformer blocks (later → higher lr)
     for i, block in enumerate(reversed(blocks)):
         add_group(list(block.named_parameters()), lr * (lr_decay ** (i + 1)))
 
-    # Everything else: patch embed, class embed, pos embed, ln_pre, ln_post, proj
     block_param_ids = {id(p) for block in blocks for p in block.parameters()}
     other = [(n, p) for n, p in backbone.named_parameters() if id(p) not in block_param_ids]
     add_group(other, lr * (lr_decay ** (num_layers + 1)))
@@ -115,20 +80,19 @@ def get_param_groups(model, lr: float, weight_decay: float, lr_decay: float = 0.
 
 # ── Training ──────────────────────────────────────────────────────────────────
 def train_and_evaluate(model, train_loader, test_loader, device,
-                       epochs, lr, warmup_epochs, patience, save_path,
+                       lr, warmup_epochs, patience, save_path,
                        gpu_id=0, task_name='', mode='ft'):
     use_amp = device.type == 'cuda'
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     if mode == 'lp':
         optimizer = optim.AdamW(model.head.parameters(), lr=lr, weight_decay=0.01)
-    else:  # ft
+    else:  # ft / lp-ft
         param_groups = get_param_groups(model, lr, weight_decay=0.01)
         optimizer = optim.AdamW(param_groups)
 
-    warmup  = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs)
-    cosine_tmax = 1000 if epochs is None else max(epochs - warmup_epochs, 1)
-    cosine  = CosineAnnealingLR(optimizer, T_max=cosine_tmax, eta_min=lr * 0.01)
+    warmup    = LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs)
+    cosine    = CosineAnnealingLR(optimizer, T_max=1000, eta_min=lr * 0.01)
     scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
 
     scaler = GradScaler('cuda', enabled=use_amp)
@@ -136,17 +100,14 @@ def train_and_evaluate(model, train_loader, test_loader, device,
     best_acc = 0.0
     best_state = None
     no_improve = 0
-    epoch_iter = itertools.count() if epochs is None else range(epochs)
-    epoch_total = '?' if epochs is None else epochs
 
-    for epoch in epoch_iter:
-        # ── Train ─────────────────────────────────────────────────────────
+    for epoch in itertools.count():
         model.train()
         if mode == 'lp':
             model.backbone.eval()
         correct_train = total_train = 0
 
-        pbar = tqdm(train_loader, desc=f"[cuda:{gpu_id}|{task_name}] {epoch+1}/{epoch_total}",
+        pbar = tqdm(train_loader, desc=f"[cuda:{gpu_id}|{task_name}] {epoch+1}/∞",
                     leave=False, position=gpu_id, dynamic_ncols=True)
         for inputs, labels in pbar:
             inputs = inputs.to(device, non_blocking=True)
@@ -170,7 +131,6 @@ def train_and_evaluate(model, train_loader, test_loader, device,
 
         scheduler.step()
 
-        # ── Evaluate ──────────────────────────────────────────────────────
         model.eval()
         correct_test = total_test = 0
         with torch.no_grad():
@@ -184,7 +144,7 @@ def train_and_evaluate(model, train_loader, test_loader, device,
 
         test_acc   = correct_test / total_test if total_test > 0 else 0
         current_lr = scheduler.get_last_lr()[0]
-        msg = f"[cuda:{gpu_id}|{task_name}] Epoch {epoch+1:>3}/{epoch_total} | lr={current_lr:.2e} | test acc={test_acc*100:.2f}%"
+        msg = f"[cuda:{gpu_id}|{task_name}] Epoch {epoch+1:>3}/∞ | lr={current_lr:.2e} | test acc={test_acc*100:.2f}%"
 
         if test_acc > best_acc:
             best_acc   = test_acc
@@ -219,17 +179,15 @@ def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zer
     save_dir = os.path.join(save_root, clip_arch, mode)
     os.makedirs(save_dir, exist_ok=True)
 
-    configs = LP_DATASET_CONFIGS if mode == 'lp' else DATASET_CONFIGS
-    candidate_tasks = [(name, configs[name])
-                       for name in (tasks if tasks else list(configs.keys()))
-                       if name in configs]
+    all_datasets = tasks if tasks else SUPPORTED_DATASETS
+    candidate_tasks = [(name, get_config(mode)) for name in all_datasets if name in SUPPORTED_DATASETS]
 
     if mode == 'lp-ft':
         missing = [name for name, _ in candidate_tasks
                    if not os.path.exists(os.path.join(save_root, clip_arch, 'lp', f'clip_{clip_arch}_{name}.pt'))]
         if missing:
             print(f'[Warning] No LP checkpoint found for {len(missing)} task(s) — skipping: {missing}')
-        target_tasks = [(name, cfg) for name, cfg in candidate_tasks if name not in missing]
+        target_tasks = [(name, c) for name, c in candidate_tasks if name not in missing]
     else:
         target_tasks = candidate_tasks
 
@@ -239,7 +197,6 @@ def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zer
 
     print(f'\nTraining {len(target_tasks)} tasks across {len(devices)} device(s).\n')
 
-    # Initialize CUDA contexts for all GPUs before launching threads.
     # Without this, threads racing to initialize CUDA while another thread is
     # inside AMP/GradScaler causes currentStreamCaptureStatusMayInitCtx errors.
     init_cuda_contexts(devices)
@@ -250,8 +207,8 @@ def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zer
 
     results = {}
     results_lock = threading.Lock()
-    # Serialize model creation across threads: open_clip text encoding +
-    # .to(device) must not race with another thread's CUDA graph capture.
+    # Serialize model creation: open_clip text encoding + .to(device) must not
+    # race with another thread's CUDA graph capture.
     model_init_lock = threading.Lock()
 
     def train_task(task_name, cfg):
@@ -259,7 +216,7 @@ def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zer
         gpu_id = device.index if device.type == 'cuda' else 0
         save_path = os.path.join(save_dir, f'clip_{clip_arch}_{task_name}.pt')
         try:
-            tprint(f"[cuda:{gpu_id}|{task_name}] Starting  arch={clip_arch}  head={head_type}  lr={cfg['lr']}  epochs={cfg.get('epochs', '∞')}  bs={cfg['bs']}")
+            tprint(f"[cuda:{gpu_id}|{task_name}] Starting  arch={clip_arch}  head={head_type}  mode={mode}  lr={cfg['lr']}  bs={cfg['bs']}  patience={cfg['patience']}")
             with model_init_lock:
                 if head_type == 'linear':
                     model = SingleTaskCLIPLinear(task_name=task_name, clip_arch=clip_arch).to(device)
@@ -281,7 +238,6 @@ def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zer
 
             _, best_acc = train_and_evaluate(
                 model, train_loader, test_loader, device,
-                epochs        = cfg.get('epochs', None),
                 lr            = cfg['lr'],
                 warmup_epochs = cfg['warmup'],
                 patience      = cfg['patience'],
@@ -317,7 +273,6 @@ def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zer
     result_path = os.path.join('results', 'single_task_accuracy', 'clip', mode,
                                f'result_clip_{head_type}_{mode}_{clip_arch}.json')
     os.makedirs(os.path.dirname(result_path), exist_ok=True)
-    import json
     existing = {}
     if os.path.exists(result_path):
         with open(result_path) as f:

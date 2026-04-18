@@ -6,7 +6,7 @@ from torch.utils.data import Dataset, DataLoader
 from typing import cast
 from datasets import load_from_disk, DatasetDict
 
-DATASET_DIR = '/data/image_classification'
+DATASET_DIR = '/data/image_classification/raw'
 
 # ---------------------------------------------------------------------------
 # Normalisation constants
