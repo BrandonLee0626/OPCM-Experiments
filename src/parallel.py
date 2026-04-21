@@ -32,76 +32,77 @@ def init_cuda_contexts(devices: list) -> None:
         torch.cuda.synchronize()
 
 
-def make_gpu_replicas(source_model, n_gpus):
-    """Create one frozen model replica per GPU."""
-    replicas = []
-    for gpu_id in range(n_gpus):
-        dev = torch.device(f'cuda:{gpu_id}')
-        replica = copy.deepcopy(source_model).to(dev)
-        # plain-dict tensors (e.g. CLIP zero-shot weights) are not moved by .to()
-        if hasattr(replica, 'zeroshot_weights'):
-            replica.zeroshot_weights = {
-                k: v.to(dev) for k, v in replica.zeroshot_weights.items()
-            }
-        replica.eval()
-        replicas.append((replica, dev))
-    return replicas
-
-
-def sync_replicas(source_model, replicas):
-    """Copy updated backbone (and heads if present) from source_model to every replica."""
-    backbone_cpu = {k: v.cpu() for k, v in source_model.backbone.state_dict().items()}
-    heads_cpu = None
-    if hasattr(source_model, 'heads'):
-        heads_cpu = {
-            name: {k: v.cpu() for k, v in head.state_dict().items()}
-            for name, head in source_model.heads.items()
+def _make_replica(source_model, gpu_id):
+    dev = torch.device(f'cuda:{gpu_id}')
+    replica = copy.deepcopy(source_model).to(dev)
+    if hasattr(replica, 'zeroshot_weights'):
+        replica.zeroshot_weights = {
+            k: v.to(dev) for k, v in replica.zeroshot_weights.items()
         }
-
-    def _copy_to(replica, dev):
-        replica.backbone.load_state_dict({k: v.to(dev) for k, v in backbone_cpu.items()})
-        if heads_cpu is not None:
-            for name, state in heads_cpu.items():
-                replica.heads[name].load_state_dict({k: v.to(dev) for k, v in state.items()})
-
-    threads = [
-        threading.Thread(target=_copy_to, args=(replica, dev), daemon=True)
-        for replica, dev in replicas
-    ]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
+    replica.eval()
+    return replica, dev
 
 
-def evaluate_parallel(replicas, tasks, model_type='vit'):
+class EvalPool:
     """
-    Evaluate tasks in parallel across GPUs using a GPU pool queue.
-    Each GPU processes one task at a time; tasks are dynamically assigned.
-    Returns dict with same key format as evaluate_model.
+    Persistent per-GPU worker threads for parallel evaluation.
+
+    Threads are created once at construction time (before any CUDA work accumulates),
+    then reused across all evaluate() calls. This avoids the CUDA context hang that
+    occurs when new threads are spawned repeatedly after CUDA is initialized.
     """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    gpu_queue = Queue()
-    for replica, dev in replicas:
-        gpu_queue.put((replica, dev))
+    def __init__(self, source_model, n_gpus, model_type='vit'):
+        self.model_type = model_type
+        self.replicas = [_make_replica(source_model, i) for i in range(n_gpus)]
 
-    results = {}
-    results_lock = threading.Lock()
+        self._task_q: Queue = Queue()
+        self._result_q: Queue = Queue()
 
-    def _worker(task_idx, task):
-        replica, dev = gpu_queue.get()
-        try:
-            acc = evaluate_task(replica, task, dev, model_type=model_type)
-            with results_lock:
-                results[f'task_{task_idx}_{task}'] = acc
-        finally:
-            gpu_queue.put((replica, dev))
+        for replica, dev in self.replicas:
+            t = threading.Thread(target=self._worker_loop, args=(replica, dev), daemon=True)
+            t.start()
 
-    # Limit concurrent threads to the number of GPUs to avoid unnecessary contention
-    with ThreadPoolExecutor(max_workers=len(replicas)) as executor:
-        futures = [executor.submit(_worker, i, task) for i, task in enumerate(tasks)]
-        for f in as_completed(futures):
-            f.result()
+    def _worker_loop(self, replica, dev):
+        if dev.type == 'cuda':
+            torch.cuda.set_device(dev)
+        while True:
+            item = self._task_q.get()
+            if item is None:
+                return
+            idx, task = item
+            try:
+                acc = evaluate_task(replica, task, dev, model_type=self.model_type)
+            except Exception as e:
+                acc = e
+            self._result_q.put((idx, task, acc))
 
-    return results
+    def sync(self, source_model):
+        """Copy updated weights from source_model to every replica (sequential, main thread)."""
+        backbone_state = source_model.backbone.state_dict()
+        heads_state = None
+        if hasattr(source_model, 'heads'):
+            heads_state = {
+                name: head.state_dict() for name, head in source_model.heads.items()
+            }
+
+        for replica, dev in self.replicas:
+            replica.backbone.load_state_dict(
+                {k: v.to(dev) for k, v in backbone_state.items()})
+            if heads_state is not None:
+                for name, state in heads_state.items():
+                    replica.heads[name].load_state_dict(
+                        {k: v.to(dev) for k, v in state.items()})
+
+    def evaluate(self, tasks) -> dict:
+        """Evaluate tasks across GPUs in parallel. Returns {task_N_name: accuracy}."""
+        for i, task in enumerate(tasks):
+            self._task_q.put((i, task))
+
+        results = {}
+        for _ in tasks:
+            idx, task, acc = self._result_q.get()
+            if isinstance(acc, Exception):
+                raise acc
+            results[f'task_{idx}_{task}'] = acc
+        return results

@@ -15,7 +15,11 @@ _vit_normalize  = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                         std=[0.229, 0.224, 0.225])
 _clip_normalize = transforms.Normalize(mean=[0.48145466, 0.4578275,  0.40821073],
                                         std=[0.26862954, 0.26130258, 0.27577711])
-_to_rgb  = transforms.Lambda(lambda x: x.convert('RGB') if hasattr(x, 'convert') else x)
+class _ToRGB:
+    def __call__(self, x):
+        return x.convert('RGB') if hasattr(x, 'convert') else x
+
+_to_rgb = _ToRGB()
 _BICUBIC = transforms.InterpolationMode.BICUBIC
 
 # ---------------------------------------------------------------------------
@@ -202,6 +206,10 @@ def _create_dataloader(dataset_name: str, is_train: bool, batch_size: int,
         'EMNIST':        lambda: dset.EMNIST(DATASET_DIR, split='byclass', train=is_train, transform=tf, download=True),
         'CIFAR10':       lambda: dset.CIFAR10(DATASET_DIR, train=is_train, transform=tf, download=True),
         'CIFAR100':      lambda: dset.CIFAR100(DATASET_DIR, train=is_train, transform=tf, download=True),
+        # Country211: geolocation (natural images) — train/test splits match s_flag directly
+        'Country211':    lambda: dset.Country211(DATASET_DIR, split=s_flag, transform=tf, download=True),
+        # Aircraft: 100-class variant-level classification; uses trainval/test splits
+        'Aircraft':      lambda: dset.FGVCAircraft(DATASET_DIR, split=pet_s_flag, annotation_level='variant', transform=tf, download=True),
     }
 
     if dataset_name in tv_configs:

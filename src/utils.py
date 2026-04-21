@@ -41,18 +41,12 @@ def load_task_vector(task, device, model_type='vit', clip_arch='ViT-B-32', vit_a
 
 def load_task_vectors(device, model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_base_patch16_224',
                       head_type='zeroshot', task_list=None, mode='ft'):
-    """Load task vectors in parallel (file I/O bound; GPU ops serialized by CUDA)."""
-    from concurrent.futures import ThreadPoolExecutor
+    """Load task vectors sequentially. Model init (open_clip/timm) in threads accumulates
+    CUDA context state that causes hangs after ~9 tasks; sequential is equally fast
+    since CUDA model init was already serialized by a lock in the old implementation."""
     tasks = task_list if task_list is not None else list(num_classes_per_task.keys())
-    load_lock = threading.Lock()  # CUDA model init on shared device needs serialization
-
-    def _load(task):
-        with load_lock:
-            return load_task_vector(task, device, model_type, clip_arch, vit_arch, head_type, mode)
-
-    with ThreadPoolExecutor(max_workers=min(4, len(tasks))) as ex:
-        results = list(ex.map(_load, tasks))
-    return results
+    return [load_task_vector(task, device, model_type, clip_arch, vit_arch, head_type, mode)
+            for task in tasks]
 
 # Cache key: (task_name, model_type)
 _test_dataloader_cache: dict = {}
@@ -71,7 +65,11 @@ def evaluate_task(model, task, eval_device, model_type='vit'):
         test_loader = _test_dataloader_cache.get(cache_key)
 
     if test_loader is None:
-        test_loader = get_test_dataloader(task, batch_size=64, model_type=model_type)
+        # num_workers=0: evaluate_task is called from ThreadPoolExecutor threads
+        # (via evaluate_parallel); forking DataLoader workers inside a thread
+        # inherits locked mutexes from sibling threads → deadlock on Linux.
+        # Evaluation is GPU-bound, so num_workers=0 has no throughput cost.
+        test_loader = get_test_dataloader(task, batch_size=64, num_workers=0, model_type=model_type)
         with _cache_lock:
             if cache_key not in _test_dataloader_cache:
                 _test_dataloader_cache[cache_key] = test_loader

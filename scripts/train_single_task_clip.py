@@ -34,6 +34,7 @@ SUPPORTED_DATASETS = [
     "MNIST", "FashionMNIST", "EMNIST", "CIFAR10", "STL10", "SVHN",
     "GTSRB", "EuroSAT", "RESISC45", "PCAM", "RenderedSST2",
     "Flowers102", "OxfordIIITPet", "Food101", "Cars", "CIFAR100", "DTD", "SUN397",
+    "Country211", "Aircraft",
 ]
 
 # lp: backbone frozen, high lr, large batch
@@ -285,6 +286,11 @@ def run_single_task_experiments(clip_arch='ViT-B-32', tasks=None, head_type='zer
 
 if __name__ == '__main__':
     import argparse
+    import multiprocessing
+    # DataLoader workers are forked inside threading.Thread workers.
+    # On Linux, 'fork' inherits locked mutexes from sibling threads → deadlock.
+    # 'forkserver' spawns workers via a clean server process that has no thread state.
+    multiprocessing.set_start_method('forkserver', force=True)
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--clip_arch', choices=['ViT-B-32', 'ViT-B-16', 'ViT-L-14'], default='ViT-B-32')

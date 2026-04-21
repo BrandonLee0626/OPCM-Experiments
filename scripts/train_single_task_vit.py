@@ -359,6 +359,12 @@ def run_single_task_experiments(vit_arch='vit_base_patch16_224', tasks=None, mod
 
 if __name__ == '__main__':
     import argparse
+    import multiprocessing
+    # DataLoader workers are forked inside threading.Thread workers.
+    # On Linux, 'fork' inherits locked mutexes from sibling threads → deadlock.
+    # 'forkserver' spawns workers via a clean server process that has no thread state.
+    multiprocessing.set_start_method('forkserver', force=True)
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--vit_arch',
                         choices=['vit_base_patch32_224', 'vit_base_patch16_224', 'vit_large_patch16_224'],

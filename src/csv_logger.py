@@ -29,8 +29,8 @@ class CSVLogger:
             'arch': arch_str,
             'head_type': head_type,
             'alpha': args.alpha,
-            'num_tasks': args.num_tasks,
-            'shuffle': args.shuffle,
+            'num_tasks': len(tasks),
+            'shuffle': False if getattr(args, 'task_order_file', None) else args.shuffle,
             'task_order': tasks,
             'single_task_accs': single_task_accs,
         }

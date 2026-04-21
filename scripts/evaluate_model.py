@@ -2,7 +2,6 @@ import os
 import sys
 import json
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -11,22 +10,27 @@ import torch
 import argparse
 
 from src.model import SingleTaskViT, SingleTaskCLIP, SingleTaskCLIPLinear
-from src.parallel import get_devices, init_cuda_contexts
+from src.parallel import get_devices
 from dataset.dataloader import get_test_dataloader
 
-_print_lock = threading.Lock()
 
-def tprint(*args, **kwargs):
-    with _print_lock:
-        print(*args, **kwargs)
+def _load_and_eval(task_name, model_path, device, model_type, arch, head_type):
+    if model_type == 'clip':
+        if head_type == 'linear':
+            model = SingleTaskCLIPLinear(task_name=task_name, clip_arch=arch).to(device)
+        else:
+            model = SingleTaskCLIP(task_name=task_name, clip_arch=arch).to(device)
+    else:
+        model = SingleTaskViT(task_name=task_name, vit_arch=arch).to(device)
 
-
-def evaluate_model(model, test_loader, device):
+    model.load_state_dict(
+        torch.load(model_path, map_location=device, weights_only=True), strict=False)
     model.eval()
+
+    loader = get_test_dataloader(task_name, batch_size=64, num_workers=4, model_type=model_type)
     correct = total = 0
     with torch.no_grad():
-        for inputs, labels in test_loader:
-            # non_blocking=True: overlaps CPU→GPU transfer with computation when pin_memory=True
+        for inputs, labels in loader:
             inputs = inputs.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
             outputs = model(inputs)
@@ -36,10 +40,24 @@ def evaluate_model(model, test_loader, device):
     return correct / total if total > 0 else 0
 
 
+def _worker_loop(device, task_q, result_q, model_type, arch, head_type):
+    if device.type == 'cuda':
+        torch.cuda.set_device(device)
+    while True:
+        item = task_q.get()
+        if item is None:
+            return
+        task_name, model_path = item
+        try:
+            acc = _load_and_eval(task_name, model_path, device, model_type, arch, head_type)
+            result_q.put((task_name, acc))
+        except Exception as e:
+            result_q.put((task_name, e))
+
+
 def evaluate_saved_models(model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_base_patch16_224',
                           head_type='zeroshot', mode='ft'):
     devices = get_devices()
-    n_parallel = len(devices)
 
     if model_type == 'clip':
         arch = clip_arch
@@ -48,17 +66,11 @@ def evaluate_saved_models(model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_
             mode = 'ft'
         models_dir = os.path.join('models', f'clip_{head_type}', arch, mode)
         prefix = f'clip_{arch}_'
-        def make_model(task_name, device):
-            if head_type == 'linear':
-                return SingleTaskCLIPLinear(task_name=task_name, clip_arch=arch).to(device)
-            return SingleTaskCLIP(task_name=task_name, clip_arch=arch).to(device)
     else:
         arch = vit_arch
         head_type = 'linear'
         models_dir = os.path.join('models', 'vit', arch, mode)
         prefix = f'{arch}_'
-        def make_model(task_name, device):
-            return SingleTaskViT(task_name=task_name, vit_arch=arch).to(device)
 
     result_path = os.path.join(
         'results', 'single_task_accuracy', model_type, mode,
@@ -76,67 +88,33 @@ def evaluate_saved_models(model_type='vit', clip_arch='ViT-B-32', vit_arch='vit_
         if file_name.startswith(prefix) and file_name.endswith('.pt')
     ]
 
-    # Pre-initialize CUDA contexts before any threading
-    init_cuda_contexts(devices)
+    task_q: Queue = Queue()
+    result_q: Queue = Queue()
 
-    # ------------------------------------------------------------------ #
-    # [1] Pre-load DataLoaders in parallel                                   #
-    #   - Dataset initialization is done concurrently before GPU evaluation  #
-    #   - num_workers: CPU cores distributed evenly across concurrent GPUs   #
-    # ------------------------------------------------------------------ #
-    num_workers = min(4, max(1, (os.cpu_count() or 4) // n_parallel))
-    print(f'Loading {len(tasks)} test dataloaders in parallel (num_workers={num_workers} each)...')
-
-    task_loaders: dict = {}
-    loader_lock = threading.Lock()
-
-    def _load_dataloader(name):
-        loader = get_test_dataloader(name, batch_size=64, num_workers=num_workers, model_type=model_type)
-        with loader_lock:
-            task_loaders[name] = loader
-
-    loader_threads = [threading.Thread(target=_load_dataloader, args=(name,), daemon=True)
-                      for name, _ in tasks]
-    for t in loader_threads: t.start()
-    for t in loader_threads: t.join()
-    print(f'Dataloaders ready.\n{"="*50}')
-
-    # ------------------------------------------------------------------ #
-    # [2] GPU device pool                                                    #
-    # ------------------------------------------------------------------ #
-    device_queue: Queue = Queue()
+    # Create one persistent worker thread per GPU (before any CUDA work)
     for dev in devices:
-        device_queue.put(dev)
+        t = threading.Thread(
+            target=_worker_loop,
+            args=(dev, task_q, result_q, model_type, arch, head_type),
+            daemon=True,
+        )
+        t.start()
+
+    for item in tasks:
+        task_q.put(item)
 
     results: dict = {}
-    results_lock = threading.Lock()
+    for _ in tasks:
+        task_name, acc = result_q.get()
+        if isinstance(acc, Exception):
+            print(f'  {task_name:<20} ERROR: {acc}')
+        else:
+            results[task_name] = acc
+            print(f'  {task_name:<20} {acc*100:.4f}%')
 
-    def eval_task(task_name, model_path):
-        device = device_queue.get()
-        try:
-            # [3] No model_init_lock: each thread uses a distinct device, so
-            #     parallel init is safe (CUDA contexts are pre-initialized)
-            model = make_model(task_name, device)
-            model.load_state_dict(
-                torch.load(model_path, map_location=device, weights_only=True), strict=False)
-            acc = evaluate_model(model, task_loaders[task_name], device)
-            with results_lock:
-                results[task_name] = acc
-            tprint(f'  {task_name:<20} {acc*100:.4f}%')
-        except Exception as e:
-            tprint(f'  {task_name:<20} ERROR: {e}')
-        finally:
-            device_queue.put(device)
-
-    # ------------------------------------------------------------------ #
-    # [4] Limit concurrent threads to the number of GPUs via ThreadPoolExecutor  #
-    #   - Before: all task threads created at once → heavy lock contention       #
-    #   - After: at most n_parallel threads run; others wait in the pool queue   #
-    # ------------------------------------------------------------------ #
-    with ThreadPoolExecutor(max_workers=n_parallel) as executor:
-        futures = [executor.submit(eval_task, name, path) for name, path in tasks]
-        for f in as_completed(futures):
-            f.result()  # re-raise any exception from the worker
+    # Signal workers to stop
+    for _ in devices:
+        task_q.put(None)
 
     print(f'\n{"="*50}')
     existing = {}

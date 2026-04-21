@@ -7,11 +7,28 @@ import torch
 
 from src.model import MultiTaskViT, MultiTaskCLIP, MultiTaskCLIPLinear
 from src.utils import load_task_vectors, evaluate_model
-from src.parallel import get_devices, make_gpu_replicas, sync_replicas, evaluate_parallel
+from src.parallel import get_devices, EvalPool
 from opcm import OPCM
 
 TASKS_8 = ['SUN397', 'Cars', 'RESISC45', 'EuroSAT', 'SVHN', 'GTSRB', 'MNIST', 'DTD']
-TASKS_14 = TASKS_8 + ['Flowers102', 'PCAM', 'OxfordIIITPet', 'STL10', 'CIFAR100', 'FashionMNIST']
+
+
+def load_task_orders_from_file(path):
+    """Load task order(s) from a text file.
+
+    Each non-empty line is one run: task names separated by spaces.
+    Example:
+      SUN397 Cars RESISC45 EuroSAT SVHN GTSRB MNIST DTD
+      DTD MNIST GTSRB SVHN EuroSAT RESISC45 Cars SUN397
+    Returns a list of task-order lists.
+    """
+    orders = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#'):
+                orders.append(line.split())
+    return orders
 
 
 def _run_once(args, tasks, task_vectors, model, gpu_replicas, csv_logger, use_mlflow, model_type, run_label=''):
@@ -20,7 +37,7 @@ def _run_once(args, tasks, task_vectors, model, gpu_replicas, csv_logger, use_ml
 
     def _evaluate(tasks_to_eval):
         if gpu_replicas is not None:
-            return evaluate_parallel(gpu_replicas, tasks_to_eval, model_type=model_type)
+            return gpu_replicas.evaluate(tasks_to_eval)
         return evaluate_model(model, tasks_to_eval, model_type=model_type)
 
     n_tasks = len(tasks)
@@ -33,7 +50,7 @@ def _run_once(args, tasks, task_vectors, model, gpu_replicas, csv_logger, use_ml
     merged_task_vector = opcm.get_merged_task_vector()
     model.load_task_vector(merged_task_vector)
     if gpu_replicas is not None:
-        sync_replicas(model, gpu_replicas)
+        gpu_replicas.sync(model)
 
     raw_accs = _evaluate(tasks[:1])
     accs = {key.split('_', 2)[2]: val for key, val in raw_accs.items()}
@@ -63,7 +80,7 @@ def _run_once(args, tasks, task_vectors, model, gpu_replicas, csv_logger, use_ml
 
         model.load_task_vector(merged_task_vector)
         if gpu_replicas is not None:
-            sync_replicas(model, gpu_replicas)
+            gpu_replicas.sync(model)
 
         print(f'  Evaluating {merged_task_number} tasks...')
         raw_accs = _evaluate(tasks[:merged_task_number])
@@ -189,25 +206,33 @@ def main(args):
         model = MultiTaskViT(vit_arch=vit_arch)
     model.to(device)
 
-    if args.num_tasks == '8':
-        base_task_list = TASKS_8
-    elif args.num_tasks == '14':
-        base_task_list = TASKS_14
+    # --- Determine task orders ---
+    if args.task_order_file:
+        task_orders = load_task_orders_from_file(args.task_order_file)
+        num_runs = len(task_orders)
+        print(f'Task order file: {args.task_order_file} ({num_runs} run(s))')
+        for i, order in enumerate(task_orders):
+            print(f'  Run {i + 1}: {order}')
+        base_task_list = task_orders[0]  # for loading task vectors (superset check not needed; all same tasks)
     else:
-        base_task_list = None  # all tasks from num_classes_per_task.json
+        task_orders = None
+        if args.num_tasks == '8':
+            base_task_list = TASKS_8
+        else:
+            base_task_list = None  # all tasks from num_classes_per_task.json
 
-    # Resolve full task list for non-shuffle single run
-    if base_task_list is None:
-        import json as _json
-        with open(os.path.join('dataset', 'num_classes_per_task.json')) as _f:
-            base_task_list = list(_json.load(_f).keys())
+        # Resolve full task list for non-shuffle single run
+        if base_task_list is None:
+            import json as _json
+            with open(os.path.join('dataset', 'num_classes_per_task.json')) as _f:
+                base_task_list = list(_json.load(_f).keys())
 
-    if args.shuffle and num_runs == 1:
-        _random.shuffle(base_task_list)
-        print(f'Task order (shuffled): {base_task_list}')
+        if args.shuffle and num_runs == 1:
+            _random.shuffle(base_task_list)
+            print(f'Task order (shuffled): {base_task_list}')
 
-    if num_runs > 1 and not args.shuffle:
-        print(f'Note: num_runs={num_runs} with shuffle=False will repeat the same task order.')
+        if num_runs > 1 and not args.shuffle:
+            print(f'Note: num_runs={num_runs} with shuffle=False will repeat the same task order.')
 
     task_vectors = load_task_vectors(device, model_type=model_type, clip_arch=clip_arch, vit_arch=vit_arch,
                                      head_type=head_type, task_list=base_task_list, mode=mode)
@@ -216,7 +241,7 @@ def main(args):
     gpu_replicas = None
     if n_gpus > 1:
         print(f'Parallel evaluation enabled across {n_gpus} GPUs.')
-        gpu_replicas = make_gpu_replicas(model, n_gpus)
+        gpu_replicas = EvalPool(model, n_gpus, model_type=model_type)
 
     # --- CSV logger setup ---
     result_txt = os.path.join(
@@ -230,9 +255,14 @@ def main(args):
         single_task_accs = load_single_task_accs(result_txt)
 
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    shuffle_suffix = '_shuffled' if args.shuffle else ''
-    runs_suffix = f'_runs{num_runs}' if num_runs > 1 else ''
-    run_name = f'{timestamp}{shuffle_suffix}{runs_suffix}'
+    if task_orders is not None:
+        n_tasks_in_file = len(task_orders[0])
+        runs_suffix = f'_runs{num_runs}' if num_runs > 1 else ''
+        run_name = f'{timestamp}_file_tasks{n_tasks_in_file}{runs_suffix}'
+    else:
+        shuffle_suffix = '_shuffled' if args.shuffle else ''
+        runs_suffix = f'_runs{num_runs}' if num_runs > 1 else ''
+        run_name = f'{timestamp}{shuffle_suffix}{runs_suffix}'
     parent_save_dir = os.path.join(
         'results', 'opcm',
         model_type, arch_str, head_type, mode,
@@ -242,9 +272,14 @@ def main(args):
 
     all_run_accs = []
 
+    tv_by_name = {tv.trained_task_names[0]: tv for tv in task_vectors}
+
     for run_idx in range(num_runs):
-        # Shuffle task order per run when num_runs > 1
-        if num_runs > 1 and args.shuffle:
+        if task_orders is not None:
+            # File-specified order
+            run_order = task_orders[run_idx]
+            shuffled_tvs = [tv_by_name[t] for t in run_order]
+        elif num_runs > 1 and args.shuffle:
             shuffled_tvs = task_vectors.copy()
             _random.shuffle(shuffled_tvs)
         else:
@@ -282,11 +317,18 @@ if __name__ == '__main__':
 
     parser.add_argument('--alpha', type=float, default=0.5)
     parser.add_argument(
+        '--task_order_file',
+        type=str,
+        default=None,
+        help='Path to a text file specifying task order(s). '
+             'Each non-empty line defines one run: task names separated by spaces. '
+             'Overrides --num_tasks, --shuffle, and --num_runs.',
+    )
+    parser.add_argument(
         '--num_tasks',
-        choices=['8', '14', 'all'],
+        choices=['8', 'all'],
         default='8',
         help='Number of tasks to use: 8 (SUN397/Cars/RESISC45/EuroSAT/SVHN/GTSRB/MNIST/DTD), '
-             '14 (8 + Flowers102/PCAM/OxfordIIITPet/STL10/CIFAR100/FashionMNIST), '
              'all (all tasks with checkpoints available, as listed in dataset/num_classes_per_task.json) ',
     )
     parser.add_argument(
