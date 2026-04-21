@@ -16,3 +16,6 @@ mlflow.db
 
 # Results
 results/
+
+# Configs
+config/
